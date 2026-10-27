@@ -1324,8 +1324,10 @@ final class PetView: NSView {
     private var awayText: String?
     var frozenTime: TimeInterval? = nil
     var onClick: (() -> Void)?
+    var onVisitorClick: (() -> Void)?
     var onRightClick: ((NSEvent) -> Void)?
     var onMoved: (() -> Void)?
+    private var lastPlay: PlayDirector.Frame?
 
     private struct Scaling { var start: TimeInterval; var appearing: Bool }
     private var hostScaling: Scaling?
@@ -1444,9 +1446,29 @@ final class PetView: NSView {
     }
     override func mouseUp(with event: NSEvent) {
         if dragging { NSCursor.pop(); dragging = false; onMoved?() }
+        else if visitorHit(event) { onVisitorClick?() }
         else { onClick?() }
     }
     override func rightMouseDown(with event: NSEvent) { onRightClick?(event) }
+
+    private func visitorHit(_ event: NSEvent) -> Bool {
+        guard visitor != nil else { return false }
+        let p = convert(event.locationInWindow, from: nil)
+        let (s, ox, _) = layout()
+        let cx = (p.x - ox) / s
+        let vx = slotX(visitorSlot) + (lastPlay?.visDX ?? 0)
+        let hx = hostX + (lastPlay?.hostDX ?? 0)
+        return abs(cx - vx) < abs(cx - hx)
+    }
+
+    /// Anchor for the visitor's card: the visiting pet's head.
+    var visitorHeadRect: NSRect {
+        guard let v = visitor else { return headRect }
+        let (s, ox, oy) = layout()
+        let l = v.layout
+        let vx = slotX(visitorSlot) + (lastPlay?.visDX ?? 0)
+        return NSRect(x: ox + (vx - l.hr) * s, y: oy + (l.hy - l.hr) * s, width: 2 * l.hr * s, height: 2 * l.hr * s)
+    }
 
     /// Anchor for the popover: the host pet's head, or its bed while it is away.
     var headRect: NSRect {
@@ -1493,6 +1515,7 @@ final class PetView: NSView {
         ctx.setLineCap(.round)
 
         let play = director?.frame(at: t)
+        lastPlay = play
         let hostXNow = hostX + (play?.hostDX ?? 0)
         let visXNow = slotX(visitorSlot) + (play?.visDX ?? 0)
 
@@ -1974,6 +1997,93 @@ final class PetNet {
     }
 }
 
+// MARK: - Visitor card (what you see when you click a visiting pet)
+
+final class VisitorCardController: NSViewController {
+    private let stack = NSStackView()
+    private let width: CGFloat = 270
+
+    override func loadView() {
+        let v = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 100))
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        v.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.widthAnchor.constraint(equalToConstant: width - 32),
+            stack.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 16),
+            stack.topAnchor.constraint(equalTo: v.topAnchor, constant: 14),
+        ])
+        let bottom = v.bottomAnchor.constraint(equalTo: stack.bottomAnchor, constant: 12)
+        bottom.priority = NSLayoutConstraint.Priority(999)
+        bottom.isActive = true
+        view = v
+    }
+
+    private func label(_ s: String, size: CGFloat = 12, weight: NSFont.Weight = .regular, color: NSColor = .labelColor, lines: Int = 1) -> NSTextField {
+        let l = NSTextField(wrappingLabelWithString: s)
+        l.font = NSFont.systemFont(ofSize: size, weight: weight)
+        l.textColor = color
+        l.maximumNumberOfLines = lines
+        l.lineBreakMode = lines == 1 ? .byTruncatingTail : .byWordWrapping
+        l.setContentHuggingPriority(lines == 1 ? .defaultHigh : .defaultLow, for: .horizontal)
+        l.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return l
+    }
+    private func add(_ v: NSView) {
+        stack.addArrangedSubview(v)
+        v.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+    }
+
+    func render(identity id: PetIdentity, state: PetState, since: Date, onSendHome: @escaping () -> Void) {
+        for v in stack.arrangedSubviews { stack.removeArrangedSubview(v); v.removeFromSuperview() }
+        let dot = NSView()
+        dot.wantsLayer = true
+        dot.layer?.backgroundColor = state.color.cgColor
+        dot.layer?.cornerRadius = 5
+        dot.translatesAutoresizingMaskIntoConstraints = false
+        dot.widthAnchor.constraint(equalToConstant: 10).isActive = true
+        dot.heightAnchor.constraint(equalToConstant: 10).isActive = true
+        let name = label(id.name, size: 14, weight: .bold)
+        name.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        let mood = label(state.title, size: 12, weight: .medium, color: state.color)
+        mood.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let head = NSStackView(views: [dot, name, mood])
+        head.orientation = .horizontal
+        head.spacing = 6
+        head.alignment = .centerY
+        add(head)
+
+        let whose = id.owner.isEmpty ? id.pet : "\(id.owner)'s \(id.pet.lowercased())"
+        add(label(whose + (id.host.isEmpty ? "" : " · from \(id.host)"), size: 12, color: .secondaryLabelColor))
+        add(label("Visiting for " + Fmt.duration(since, now: Date()), size: 11, color: .tertiaryLabelColor))
+
+        let sep = NSBox(); sep.boxType = .separator
+        add(sep)
+        add(label("A visiting pet shares only its name, its owner's name, their computer's name, its look and its mood.", size: 10, color: .tertiaryLabelColor, lines: 3))
+
+        let btn = ClosureButton(title: "Send home", target: nil, action: nil)
+        btn.handler = onSendHome
+        btn.target = btn
+        btn.action = #selector(ClosureButton.fire)
+        btn.bezelStyle = .rounded
+        btn.controlSize = .small
+        btn.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        let row = NSStackView(views: [spacer, btn])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        add(row)
+
+        view.layoutSubtreeIfNeeded()
+        let size = NSSize(width: width, height: max(60, view.fittingSize.height))
+        preferredContentSize = size
+        if view.window == nil { view.frame.size = size }
+    }
+}
+
 // MARK: - Window & app
 
 final class PetWindow: NSWindow {
@@ -2001,6 +2111,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     var awayPeer: PetNet.Peer?
     var visitorLink: Link?
     var visitorIdentity: PetIdentity?
+    var visitorSince: Date?
     var pendingLinks: [Link] = []
     var netTimer: Timer?
     var lastPing = Date.distantPast
@@ -2113,6 +2224,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         pet = PetView(frame: NSRect(origin: .zero, size: size))
         pet.autoresizingMask = [.width, .height]
         pet.onClick = { [weak self] in self?.togglePopover() }
+        pet.onVisitorClick = { [weak self] in self?.showVisitorCard() }
         pet.onRightClick = { [weak self] e in self?.showMenu(e) }
         pet.onMoved = { [weak self] in self?.savePosition() }
         window.contentView = pet
@@ -2244,6 +2356,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     func popoverDidClose(_ notification: Notification) {
         popover = nil
         statusVC = nil
+    }
+
+    func showVisitorCard() {
+        guard let id = visitorIdentity else { togglePopover(); return }
+        if let p = popover, p.isShown { p.performClose(nil); return }
+        let vc = VisitorCardController()
+        vc.render(identity: id, state: pet.visitorDriver.state, since: visitorSince ?? Date()) { [weak self] in
+            self?.popover?.performClose(nil)
+            self?.dismissVisitor()
+        }
+        let p = NSPopover()
+        p.contentViewController = vc
+        p.behavior = .transient
+        p.animates = true
+        p.delegate = self
+        popover = p
+        statusVC = nil
+        NSApp.activate(ignoringOtherApps: true)
+        p.show(relativeTo: pet.visitorHeadRect, of: pet, preferredEdge: .maxY)
     }
 
     // Position & size --------------------------------------------------------
@@ -2582,6 +2713,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func acceptVisitor(_ id: PetIdentity, link: Link, state: PetState) {
         visitorLink = link
         visitorIdentity = id
+        visitorSince = Date()
         setSlots(2)
         let artist = PetArtist(spec: id.spec ?? PetSpec.builtin("rabbit") ?? PetSpec.fallback)
         artist.name = id.name
@@ -2596,6 +2728,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         pet.leaveVisitor()
         visitorLink = nil
         visitorIdentity = nil
+        visitorSince = nil
+        if statusVC == nil, let p = popover, p.isShown { p.performClose(nil) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
             guard let self = self, self.visitorIdentity == nil, self.pet.visitor == nil else { return }
             self.setSlots(1)
@@ -2739,7 +2873,32 @@ func renderStatusPNG(path: String, dark: Bool) {
     }
 }
 
+func renderVisitorCardPNG(path: String, dark: Bool) {
+    let app = NSApplication.shared
+    app.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+    let vc = VisitorCardController()
+    let id = PetIdentity(id: "x", name: "Pixel", owner: "Aron Example", host: "Aron's MacBook Air", pet: "Fox")
+    vc.render(identity: id, state: .working, since: Date().addingTimeInterval(-200)) {}
+    let size = vc.preferredContentSize
+    let win = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: false)
+    win.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+    win.contentViewController = vc
+    let v = vc.view
+    v.wantsLayer = true
+    v.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+    v.layoutSubtreeIfNeeded()
+    guard let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { return }
+    v.cacheDisplay(in: v.bounds, to: rep)
+    if let data = rep.representation(using: .png, properties: [:]) {
+        try? data.write(to: URL(fileURLWithPath: path))
+    }
+}
+
 let argv = CommandLine.arguments
+if argv.count >= 3 && argv[1] == "--render-visitor-card" {
+    renderVisitorCardPNG(path: argv[2], dark: argv.count > 3 && argv[3] == "dark")
+    exit(0)
+}
 if argv.count >= 3 && argv[1] == "--render-status" {
     renderStatusPNG(path: argv[2], dark: argv.count > 3 && argv[3] == "dark")
     exit(0)
