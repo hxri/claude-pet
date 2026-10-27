@@ -9,6 +9,7 @@ sessions are doing, and that can visit a friend's pet when your laptops are near
 - Click it for the status card: every session (by its conversation title), its state and last tool, model, context use,
   cost, and your 5-hour / weekly usage.
 - Right-click to name it, pick a pet, coat and size, and to send it to a nearby friend's pet.
+- Hold **Control + Option** together and it dances (a visiting pet joins in). "Dance!" is in the menu too.
 
 ## Install
 
@@ -59,7 +60,7 @@ with it, so your friends see your custom pet when it visits, whatever pets they 
 ## Scripting it
 
 The app watches `~/.claude/pet/control/`. Creating a file there triggers an action and the file is
-removed: `send` (optional content: part of the friend's pet name), `recall`, `dismiss`, `name`
+removed: `send` (optional content: part of the friend's pet name), `recall`, `dismiss`, `dance` (content: seconds), `name`
 (content: the new name), `pet` (content: a pet id from `pets/`), `snapshot` (writes `snapshot.png`). `net-state.json` lists nearby pets
 and the current visit.
 
