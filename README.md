@@ -6,7 +6,7 @@ sessions are doing, and that can visit a friend's pet when your laptops are near
 - A rabbit (or cat) sits on your desktop. Drag it anywhere.
 - It types while Claude works, hops when it's your turn, perks up with a "!" when Claude needs
   you, and naps when nothing is running. The collar tag is the status light.
-- Click it for the status card: every session, its state and last tool, model, context use,
+- Click it for the status card: every session (by its conversation title), its state and last tool, model, context use,
   cost, and your 5-hour / weekly usage.
 - Right-click to name it, pick a pet, coat and size, and to send it to a nearby friend's pet.
 
