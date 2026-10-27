@@ -7,3 +7,4 @@ snapshot*.png
 settings.json.bak-*
 statusline.original
 *.zip
+.DS_Store

@@ -1345,6 +1345,83 @@ final class PlayDirector {
     }
 }
 
+// MARK: - Dance director (Control+Option, the Dance! menu item, or control/dance)
+
+final class DanceDirector {
+    enum Move: CaseIterable { case bounce, twist, spin, slide, shimmy, clap }
+    struct Frame {
+        var hop: CGFloat = 0, tilt: CGFloat = 0, dx: CGFloat = 0, facing: CGFloat = 1
+        var sx: CGFloat = 1, sy: CGFloat = 1
+        var earL: CGFloat = 0.5, earR: CGFloat = 0.5, tail: CGFloat = 0
+        var pawL: CGFloat = 0, pawR: CGFloat = 0
+        var sing = false
+    }
+    let start: TimeInterval
+    var holdUntil: TimeInterval
+    private let sequence: [Move]
+    private let moveLen: TimeInterval = 2.0
+
+    init(at t: TimeInterval, seconds: TimeInterval) {
+        start = t
+        holdUntil = t + seconds
+        sequence = Move.allCases.shuffled()
+    }
+
+    var currentMove: Move {
+        return sequence[0]
+    }
+
+    /// `partner` mirrors the routine so two pets dance as a pair.
+    func frame(at t: TimeInterval, partner: Bool = false) -> Frame {
+        let el = max(0, t - start)
+        let idx = Int(el / moveLen) % sequence.count
+        let move = sequence[idx]
+        let tt = el + (partner ? 0.25 : 0)
+        let beat = tt * 2 * .pi * 2          // 120 bpm
+        var f = Frame()
+        f.tail = CGFloat(sin(tt * 2 * .pi * 3))
+        f.earL = 0.5 + 0.5 * CGFloat(sin(beat))
+        f.earR = 0.5 - 0.5 * CGFloat(sin(beat))
+        switch move {
+        case .bounce:
+            f.hop = 12 * abs(CGFloat(sin(tt * 2 * .pi)))
+            f.tilt = 8 * .pi / 180 * CGFloat(sin(tt * 2 * .pi))
+            f.sing = sin(beat) > 0.6
+        case .twist:
+            f.tilt = 12 * .pi / 180 * CGFloat(sin(tt * 2 * .pi * 2))
+            f.sx = 1 + 0.08 * CGFloat(sin(tt * 2 * .pi * 4))
+            f.sy = 1 - 0.08 * CGFloat(sin(tt * 2 * .pi * 4))
+            f.hop = 3 * abs(CGFloat(sin(tt * 2 * .pi * 2)))
+        case .spin:
+            let c = CGFloat(cos(tt * 2 * .pi * 1.5))
+            f.facing = c >= 0 ? 1 : -1
+            f.sx = 0.45 + 0.55 * abs(c)
+            f.hop = 6 * abs(CGFloat(sin(tt * 2 * .pi * 3)))
+            f.tilt = 5 * .pi / 180 * CGFloat(sin(tt * 2 * .pi * 2))
+        case .slide:
+            let c = CGFloat(cos(tt * 2 * .pi * 0.5))
+            f.dx = 28 * CGFloat(sin(tt * 2 * .pi * 0.5))
+            f.facing = c > 0 ? -1 : 1
+            f.hop = 4 * abs(CGFloat(sin(tt * 2 * .pi * 4)))
+            f.tilt = -4 * .pi / 180 * c
+            f.sing = sin(beat) > 0.6
+        case .shimmy:
+            f.tilt = 4 * .pi / 180 * CGFloat(sin(tt * 2 * .pi * 8))
+            f.sx = 1 + 0.03 * CGFloat(sin(tt * 2 * .pi * 8))
+            f.earL = 1; f.earR = 1
+            f.hop = 2
+        case .clap:
+            let c = max(0, CGFloat(sin(tt * 2 * .pi * 3)))
+            f.pawL = c; f.pawR = c
+            f.hop = 8 * abs(CGFloat(sin(tt * 2 * .pi * 1.5)))
+            f.tilt = 6 * .pi / 180 * CGFloat(sin(tt * 2 * .pi * 1.5))
+            f.sing = true
+        }
+        if partner { f.dx = -f.dx; f.tilt = -f.tilt; f.facing = -f.facing }
+        return f
+    }
+}
+
 // MARK: - Pet view (window content: host pet, optional visitor, bed, effects)
 
 final class PetView: NSView {
@@ -1366,6 +1443,9 @@ final class PetView: NSView {
     var onRightClick: ((NSEvent) -> Void)?
     var onMoved: (() -> Void)?
     private var lastPlay: PlayDirector.Frame?
+    private var dance: DanceDirector?
+    private var comboDown = false
+    var isDancing: Bool { return dance != nil }
 
     private struct Scaling { var start: TimeInterval; var appearing: Bool }
     private var hostScaling: Scaling?
@@ -1396,9 +1476,27 @@ final class PetView: NSView {
 
     private func tick() {
         frameCount += 1
-        let idle = hostDriver.state == .sleeping && visitor == nil && poofs.isEmpty && hostScaling == nil && !hovering && !dragging
+        pollDanceKeys()
+        let idle = hostDriver.state == .sleeping && visitor == nil && poofs.isEmpty && hostScaling == nil && !hovering && !dragging && dance == nil
         if idle && frameCount % 3 != 0 { return }
         needsDisplay = true
+    }
+
+    /// Control+Option held together starts a dance; it keeps going while held (at least 4 s).
+    private func pollDanceKeys() {
+        let flags = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let combo = flags.contains(.control) && flags.contains(.option)
+        let t = now
+        if combo && !comboDown { startDance(seconds: 4) }
+        if combo, let d = dance { d.holdUntil = max(d.holdUntil, t + 0.4) }
+        comboDown = combo
+        if let d = dance, t > d.holdUntil { dance = nil }
+    }
+
+    func startDance(seconds: TimeInterval) {
+        guard !away else { return }
+        if let d = dance { d.holdUntil = max(d.holdUntil, now + seconds); return }
+        dance = DanceDirector(at: now, seconds: seconds)
     }
 
     var canvasSize: CGSize { return CGSize(width: PetView.slotWidth * CGFloat(slots), height: PetView.canvasHeight) }
@@ -1554,8 +1652,10 @@ final class PetView: NSView {
 
         let play = director?.frame(at: t)
         lastPlay = play
-        let hostXNow = hostX + (play?.hostDX ?? 0)
-        let visXNow = slotX(visitorSlot) + (play?.visDX ?? 0)
+        let danceH = dance?.frame(at: t)
+        let danceV = dance?.frame(at: t, partner: true)
+        let hostXNow = hostX + (play?.hostDX ?? 0) + (danceH?.dx ?? 0)
+        let visXNow = slotX(visitorSlot) + (play?.visDX ?? 0) + (danceV?.dx ?? 0)
 
         if away { drawBed(ctx, x: hostX, t: t) }
         if hostVisible {
@@ -1565,10 +1665,12 @@ final class PetView: NSView {
                 a.tilt += p.hostTilt
                 if p.hostHappy && a.eyeStyle == .open && hostDriver.state != .attention { a.eyeStyle = .happy }
             }
+            var facing = play?.hostFacing ?? 1
+            if let d = danceH { applyDance(d, to: &a); facing = d.facing }
             host.showName = visitor != nil
             ctx.saveGState()
             ctx.translateBy(x: hostXNow - CX, y: 0)
-            host.draw(ctx, a, t: t, facing: play?.hostFacing ?? 1, scale: scaleFactor(hostScaling, t))
+            host.draw(ctx, a, t: t, facing: facing, scale: scaleFactor(hostScaling, t))
             ctx.restoreGState()
         }
         if let v = visitor {
@@ -1578,15 +1680,46 @@ final class PetView: NSView {
                 a.tilt += p.visTilt
                 if p.visHappy && a.eyeStyle == .open { a.eyeStyle = .happy }
             }
+            var facing = play?.visFacing ?? 1
+            if let d = danceV { applyDance(d, to: &a); facing = d.facing }
             ctx.saveGState()
             ctx.translateBy(x: visXNow - CX, y: 0)
-            v.draw(ctx, a, t: t, facing: play?.visFacing ?? 1, scale: scaleFactor(visitorScaling, t))
+            v.draw(ctx, a, t: t, facing: facing, scale: scaleFactor(visitorScaling, t))
             ctx.restoreGState()
         }
         if let p = play, p.hearts { drawHearts(ctx, x: (hostXNow + visXNow) / 2, y: 140, t: t) }
+        if dance != nil && hostVisible {
+            drawNotes(ctx, x: hostXNow, t: t)
+            if visitor != nil { drawNotes(ctx, x: visXNow, t: t + 0.7) }
+        }
         drawPoofs(ctx, t)
         drawNote(ctx, t)
         ctx.restoreGState()
+    }
+
+    private func applyDance(_ d: DanceDirector.Frame, to a: inout Anim) {
+        a.hop += d.hop
+        a.tilt += d.tilt
+        a.sx *= d.sx
+        a.sy *= d.sy
+        a.earL = d.earL; a.earR = d.earR
+        a.tail = d.tail
+        a.pawL = max(a.pawL, d.pawL); a.pawR = max(a.pawR, d.pawR)
+        a.headTilt = 0
+        if a.eyeOpen > 0.2 { a.eyeStyle = .happy }
+        a.mouth = d.sing ? .open : .smile
+    }
+
+    private func drawNotes(_ ctx: CGContext, x: CGFloat, t: TimeInterval) {
+        let colors = [rgb(255, 107, 138), rgb(138, 107, 255), rgb(255, 170, 60), rgb(60, 190, 160)]
+        for i in 0..<4 {
+            let ph = (t * 0.55 + Double(i) * 0.25).truncatingRemainder(dividingBy: 1)
+            let side: CGFloat = i % 2 == 0 ? -1 : 1
+            let nx = x + side * (44 + 8 * CGFloat(sin(ph * 2 * .pi + Double(i))))
+            let ny = 70 + 80 * CGFloat(ph)
+            let alpha = CGFloat(sin(ph * .pi))
+            host.drawText(i % 2 == 0 ? "♪" : "♫", at: CGPoint(x: nx, y: ny), size: 13 + CGFloat(i) * 2, weight: .bold, color: colors[i].withAlphaComponent(alpha))
+        }
     }
 
     private func drawBed(_ ctx: CGContext, x: CGFloat, t: TimeInterval) {
@@ -2472,6 +2605,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let m = NSMenu()
         m.autoenablesItems = false
         m.addItem(withTitle: "Claude status…", action: #selector(menuStatus), keyEquivalent: "").target = self
+        let dance = m.addItem(withTitle: "Dance!", action: #selector(danceAction), keyEquivalent: "")
+        dance.target = self
+        dance.toolTip = "Or hold Control and Option together"
         m.addItem(.separator())
 
         let nearby = NSMenu()
@@ -2544,6 +2680,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     @objc func menuStatus() { if popover == nil { togglePopover() } }
+    @objc func danceAction() { pet.startDance(seconds: 8) }
     @objc func sendToPeer(_ sender: NSMenuItem) {
         let peers = net.peers
         guard sender.tag >= 0, sender.tag < peers.count else { return }
@@ -2556,6 +2693,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     @objc func pickPet(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
         petFile = id
+        coatIndex = nil            // each pet starts in its own colours
         loadPet()
         net.update(identity: identity)
         writeNetState()
@@ -2822,11 +2960,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 }
             case "recall": callBack()
             case "dismiss": dismissVisitor()
+            case "dance": pet.startDance(seconds: Double(body) ?? 8)
             case "snapshot": snapshot(to: body.isEmpty ? petHome + "/snapshot" + (profile.isEmpty ? "" : "-" + profile) + ".png" : body)
             case "name": if !body.isEmpty { setPetName(body) }
             case "pet":
                 if !body.isEmpty {
                     petFile = body
+                    coatIndex = nil
                     loadPet()
                     net.update(identity: identity)
                     writeNetState()
