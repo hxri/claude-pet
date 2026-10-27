@@ -1,0 +1,9 @@
+ClaudePet.app/
+sessions/
+status/
+control*/
+net-state*.json
+snapshot*.png
+settings.json.bak-*
+statusline.original
+*.zip
