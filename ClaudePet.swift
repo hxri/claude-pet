@@ -88,11 +88,14 @@ struct Session {
     var contextSize: Int? = nil
     var contextTokens: Int? = nil
     var cost: Double? = nil
+    var title: String? = nil
 
     var project: String {
         let last = (cwd as NSString).lastPathComponent
         return last.isEmpty ? cwd : last
     }
+    /// What the status card calls the session: its conversation title, else the folder.
+    var displayName: String { return title ?? project }
 }
 
 struct RateLimit { var usedPct: Double; var resetsAt: Date? }
@@ -144,6 +147,7 @@ final class SessionStore {
     private(set) var sessions: [Session] = []
     private(set) var rateLimits: RateLimits? = nil
     private var transcriptCache: [String: (mtime: Date, model: String?, tokens: Int?)] = [:]
+    private var titleCache: [String: (mtime: Date, title: String?)] = [:]
     private let fm = FileManager.default
 
     /// Most urgent state across sessions (drives the collar tag colour).
@@ -186,6 +190,7 @@ final class SessionStore {
                 if s.model == nil { s.model = info.model }
                 if s.contextTokens == nil { s.contextTokens = info.tokens }
             }
+            if let t = s.transcript { s.title = transcriptTitle(t) }
             out.append(s)
         }
         // Sessions that have a status line but no hook event yet, e.g. ones that
@@ -214,6 +219,7 @@ final class SessionStore {
                 if s.model == nil { s.model = info.model }
                 if s.contextTokens == nil { s.contextTokens = info.tokens }
             }
+            if let t = s.transcript { s.title = transcriptTitle(t) }
             out.append(s)
         }
         out.sort { $0.updated > $1.updated }
@@ -331,6 +337,38 @@ final class SessionStore {
                 s.started = min(s.started, Date(timeIntervalSince1970: ts - dur / 1000))
             }
         }
+    }
+
+    /// The conversation's title: the latest `custom-title` line, which is what the Claude
+    /// desktop app shows in its sidebar and what `/rename` sets. Those lines are re-written
+    /// as the conversation goes on, so after one full read only the tail is checked.
+    private func transcriptTitle(_ path: String) -> String? {
+        guard let attrs = try? fm.attributesOfItem(atPath: path),
+              let mtime = attrs[.modificationDate] as? Date,
+              let size = (attrs[.size] as? NSNumber)?.intValue else { return nil }
+        let cached = titleCache[path]
+        if let c = cached, c.mtime == mtime { return c.title }
+        guard let fh = FileHandle(forReadingAtPath: path) else { return cached?.title }
+        let tail = 64 * 1024
+        let seeked = cached != nil && size > tail
+        if seeked { fh.seek(toFileOffset: UInt64(size - tail)) }
+        var data = fh.readDataToEndOfFile()
+        fh.closeFile()
+        // Start at a line boundary so a cut multi-byte character can't spoil the decoding.
+        if seeked, let nl = data.firstIndex(of: 0x0A) { data = data.subdata(in: (nl + 1)..<data.endIndex) }
+        var title = cached?.title
+        if let text = String(data: data, encoding: .utf8) {
+            for line in text.split(separator: "\n").reversed() where line.contains("\"type\":\"custom-title\"") {
+                guard let d = line.data(using: .utf8),
+                      let o = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
+                      let t = (o["customTitle"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !t.isEmpty else { continue }
+                title = t
+                break
+            }
+        }
+        titleCache[path] = (mtime, title)
+        return title
     }
 
     private func transcriptInfo(_ path: String) -> (model: String?, tokens: Int?) {
@@ -1789,7 +1827,8 @@ final class StatusViewController: NSViewController {
         }
         for s in store.sessions {
             let v = vstack(3)
-            let name = label(s.project, size: 13, weight: .semibold)
+            let name = label(s.displayName, size: 13, weight: .semibold)
+            name.toolTip = s.cwd
             let when = label(Fmt.ago(s.updated, now: now), size: 11, color: .tertiaryLabelColor, fixed: true)
             add(hrow([dot(s.state.color), name, spacer(), when]), to: v)
 
