@@ -2670,6 +2670,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     // Position & size --------------------------------------------------------
 
+    /// Whether a strip of `slots` pets fits the screen the host is on (the window covers one screen).
+    func stripFits(_ slots: Int) -> Bool {
+        let screen = window.screen ?? NSScreen.main ?? NSScreen.screens[0]
+        return CGFloat(slots) * PetView.slotWidth * sizeFactor <= screen.frame.width
+    }
+
     /// The strip's bottom-left corner in screen coordinates.
     var stripOriginOnScreen: NSPoint { return NSPoint(x: window.frame.minX + pet.stripOrigin.x, y: window.frame.minY + pet.stripOrigin.y) }
 
@@ -2710,7 +2716,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
         if window.frame != screen.frame { window.setFrame(screen.frame, display: false) }
         pet.stripOrigin = CGPoint(x: o.x - screen.frame.minX, y: o.y - screen.frame.minY)
-        inputWindow.setFrame(NSRect(origin: o, size: pet.stripRect.size), display: false)
+        // taller than the canvas: ears and bubbles rise above it during hops
+        inputWindow.setFrame(NSRect(origin: o, size: NSSize(width: pet.stripRect.width, height: pet.stripRect.height + 40 * pet.scale)), display: false)
         pet.refresh()
     }
     @objc func screensChanged() {
@@ -3003,7 +3010,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             case "hello":
                 ident = PetIdentity(dict: msg)
             case "visit":
-                if self.allowVisitors, self.visitors.count < AppDelegate.maxVisitors, let id = ident, !self.visitors.contains(where: { $0.identity.id == id.id }) {
+                if self.allowVisitors, self.visitors.count < AppDelegate.maxVisitors, self.stripFits(self.visitors.count + 2), let id = ident, !self.visitors.contains(where: { $0.identity.id == id.id }) {
                     self.acceptVisitor(id, link: link, state: PetState.named(msg["state"] as? String ?? "ready"))
                 } else {
                     link.send(["t": "busy"])
