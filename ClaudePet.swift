@@ -1337,7 +1337,8 @@ final class PlayDirector {
                 f.visFacing = -dir
             }
         case .chase:
-            let far = PlayDirector.slot + PlayDirector.near
+            // The host stands in the window's outer slot, so overshoot only a little or the guest is cut off at the edge.
+            let far = PlayDirector.slot + 24
             func crossHop(_ q: CGFloat) -> CGFloat {
                 let distToHost = abs(dir * PlayDirector.slot + f.visDX)
                 return distToHost < 70 ? 30 * (1 - distToHost / 70) + 6 : hops(q, count: 4, height: 6)
