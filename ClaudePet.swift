@@ -478,6 +478,7 @@ struct Anim {
     var earL: CGFloat = 0, earR: CGFloat = 0     // -1 flat/drooped … 0 neutral … +1 perked
     var pawL: CGFloat = 0, pawR: CGFloat = 0     // 0…1 lift (typing)
     var feet: CGFloat = 0                        // 0…1 while being carried
+    var typing: CGFloat = 0                      // 0…1 keyboard out, paws typing (working only)
     var nose: CGFloat = 0                        // -1…1 twitch
     var headTilt: CGFloat = 0                    // -1…1
     var breath: CGFloat = 0, bob: CGFloat = 0, bobFast: CGFloat = 0
@@ -495,9 +496,11 @@ final class AnimDriver {
     private(set) var stateChangedAt: TimeInterval = 0
     private var nextBlink: TimeInterval = 2, blinkStart: TimeInterval = -1
     private var nextTwitch: TimeInterval = 4, twitchStart: TimeInterval = -1
+    private var typingStart: TimeInterval = 0, typingEnd: TimeInterval = 0, nextTyping: TimeInterval = 0
+    var forceTyping = false   // --render typing
 
     func set(_ s: PetState, at t: TimeInterval) {
-        if s != state { state = s; stateChangedAt = t }
+        if s != state { state = s; stateChangedAt = t; typingEnd = 0 }
     }
 
     func compute(t: TimeInterval, hovering: Bool, dragging: Bool, look: CGPoint?) -> Anim {
@@ -547,6 +550,21 @@ final class AnimDriver {
             a.pawL = max(0, a.bobFast); a.pawR = max(0, -a.bobFast)
             a.eyeScale = 0.92
             a.lookY -= 1.3
+            // Now and then the pet pulls out a keyboard and types for a few seconds.
+            if nextTyping < stateChangedAt { nextTyping = stateChangedAt + Double.random(in: 5...12) }
+            if t >= nextTyping {
+                typingStart = t
+                typingEnd = t + Double.random(in: 3...6)
+                nextTyping = typingEnd + Double.random(in: 8...20)
+            }
+            if forceTyping { typingStart = t - 1; typingEnd = t + 10 }
+            a.typing = CGFloat(min(1, max(0, min(t - typingStart, typingEnd - t) / 0.35)))
+            if a.typing > 0 {
+                let k = CGFloat(sin(t * 2 * .pi * 9))
+                a.pawL += a.typing * (max(0, k) - a.pawL)
+                a.pawR += a.typing * (max(0, -k) - a.pawR)
+                a.lookY -= 0.7 * a.typing
+            }
         case .waiting:
             a.tail = 0.6 * CGFloat(sin(t * 2 * .pi * 0.9))
             a.earL = 0.3; a.earR = 0.3 + twitch * 0.5
@@ -888,12 +906,34 @@ final class PetArtist {
         ctx.setLineCap(.round)
         for p in spec.parts { drawPart(ctx, p, a, mirrored: false) }
         ctx.restoreGState()
+        if a.typing > 0 { drawKeyboard(ctx, a, t, scale: scale) }
 
         ctx.saveGState()
         ctx.setAlpha(scale)
         drawBubble(ctx, a, t)
         drawBadge(ctx)
         if showName && !name.isEmpty { drawNameTag(ctx, name, at: CGPoint(x: CX, y: l.gy - 13)) }
+        ctx.restoreGState()
+    }
+
+    /// A small keyboard at the pet's feet while it types.
+    private func drawKeyboard(_ ctx: CGContext, _ a: Anim, _ t: TimeInterval, scale: CGFloat) {
+        let w: CGFloat = 70, h: CGFloat = 17
+        ctx.saveGState()
+        ctx.translateBy(x: CX, y: layout.gy - 12)
+        ctx.scaleBy(x: a.typing * scale, y: a.typing * scale)
+        ctx.setAlpha(a.typing)
+        ctx.addPath(CGPath(roundedRect: CGRect(x: -w / 2, y: 0, width: w, height: h), cornerWidth: 4, cornerHeight: 4, transform: nil))
+        ctx.setFillColor(rgb(58, 60, 72).cgColor)
+        ctx.fillPath()
+        let hit = Int(t * 13) * 5 % 24
+        for row in 0..<3 {
+            for col in 0..<8 {
+                let on = row * 8 + col == hit
+                ctx.setFillColor((on ? rgb(255, 214, 10) : rgb(200, 204, 216)).cgColor)
+                ctx.fill(CGRect(x: -w / 2 + 3.5 + CGFloat(col) * 8, y: 2.5 + CGFloat(row) * 4.8, width: 6.6, height: 3.6))
+            }
+        }
         ctx.restoreGState()
     }
 
@@ -3034,7 +3074,8 @@ func renderPNG(state: String, path: String, coat: Int?, points: CGFloat, petArg:
     var spec = PetSpec.builtin(petArg) ?? PetSpec.fallback
     if let c = coat, c >= 0, c < Coat.all.count { spec = spec.applying(coat: Coat.all[c]) }
     view.host.spec = spec
-    view.setHostState(PetState.named(state))
+    view.setHostState(PetState.named(state == "typing" ? "working" : state))
+    view.hostDriver.forceTyping = state == "typing"
     view.host.tagColor = view.host.state.color
     view.frozenTime = 1.0
     let scale: CGFloat = 2
