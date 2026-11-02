@@ -4,7 +4,7 @@ A small animated desktop pet for macOS that mirrors what your [Claude Code](http
 sessions are doing, and that can visit a friend's pet when your laptops are near each other.
 
 - A rabbit (or cat) sits on your desktop. Drag it anywhere.
-- It types while Claude works, hops when it's your turn, perks up with a "!" when Claude needs
+- It types while Claude works (now and then it pulls out a tiny keyboard; right-click → **Typing keyboard** turns that off), hops when it's your turn, perks up with a "!" when Claude needs
   you, and naps when nothing is running. The collar tag is the status light.
 - Click it for the status card: every session (by its conversation title), its state and last tool, model, context use,
   cost, and your 5-hour / weekly usage.
@@ -36,6 +36,8 @@ Both laptops need the pet running and either the same Wi-Fi network or Wi-Fi swi
 1. Right-click your pet → **Nearby pets** → *Send to \<friend's pet\>*.
 2. Your pet poofs away and leaves its bed behind. On your friend's screen the window widens and
    the two pets play: greeting hops, nuzzles with hearts, chasing, zoomies.
+   Up to three pets can visit one host at once; the window grows to fit them, and right-click →
+   *Send \<pet\> home* sends one back.
 3. Your pet keeps showing *your* Claude status while it's away, so your friend can see when you're
    busy. Right-click (or click the bed) → **Call back** brings it home. The host can also send a
    visitor home. If the laptops lose each other, the pet comes home by itself after ~25 seconds.
@@ -74,6 +76,6 @@ and the current visit.
 ## Hacking
 
 Everything is in `ClaudePet.swift`; `build.sh --restart` rebuilds and relaunches. Preview the pet
-offline with `ClaudePet.app/Contents/MacOS/ClaudePet --render <state> out.png [coat] [points] [rabbit|cat]`
+offline with `ClaudePet.app/Contents/MacOS/ClaudePet --render <state|typing> out.png [coat] [points] [rabbit|cat]`
 and the card with `--render-status out.png [dark]`. `CLAUDEPET_PROFILE=test` runs a second,
 independent instance, which is how visits are tested on one machine.
