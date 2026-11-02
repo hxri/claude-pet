@@ -1541,7 +1541,8 @@ final class PetView: NSView {
 
     /// Repaints the strip (and where it was), not the whole screen. A speech note can run far past the strip.
     func refresh() {
-        let dirty = stripRect.insetBy(dx: -(note == nil ? 60 : 300) * scale, dy: -30 * scale)
+        var dirty = stripRect.insetBy(dx: -(note == nil ? 60 : 300) * scale, dy: -30 * scale)
+        dirty.size.height += 80 * scale   // hops stack: a waiting guest mid-chase puts its bubble at y=234 of a 190 canvas
         setNeedsDisplay(dirty.union(lastDirty))
         lastDirty = dirty
     }
