@@ -2708,7 +2708,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     func place(_ o: NSPoint) {
         var o = clamped(o)
         let host = NSPoint(x: o.x + pet.hostX * pet.scale, y: o.y + 60 * pet.scale)
-        let screen = NSScreen.screens.first { $0.frame.contains(host) } ?? window.screen ?? NSScreen.main ?? NSScreen.screens[0]
+        var screen = NSScreen.screens.first { $0.frame.contains(host) } ?? window.screen ?? NSScreen.main ?? NSScreen.screens[0]
+        // A display too small for the strip is not a place to drop it: stay on the current one.
+        if pet.stripRect.width > screen.frame.width, let cur = window.screen { screen = cur }
         if NSScreen.screens.count > 1 {   // never straddle two displays: the guests would be cut off at the seam
             let f = screen.frame, r = pet.stripRect
             if r.width <= f.width { o.x = min(max(o.x, f.minX), f.maxX - r.width) }
