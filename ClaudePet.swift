@@ -1475,13 +1475,13 @@ final class PetView: NSView {
     static let slotWidth: CGFloat = 180, canvasHeight: CGFloat = 190
     let CX: CGFloat = 84
 
-    var slots = 1 { didSet { needsDisplay = true } }
+    var slots = 1 { didSet { refresh() } }
     var hostSlot = 0
     let host = PetArtist(spec: PetSpec.fallback)
     let hostDriver = AnimDriver()
     final class Guest {
         let id: String, artist: PetArtist, driver = AnimDriver()
-        fileprivate var scaling: Scaling?, director: PlayDirector?, play: PlayDirector.Frame?
+        fileprivate var scaling: Scaling?, director: PlayDirector?, play: PlayDirector.Frame?, x: CGFloat?
         init(id: String, artist: PetArtist) { self.id = id; self.artist = artist }
     }
     private(set) var guests: [Guest] = []
@@ -1503,6 +1503,7 @@ final class PetView: NSView {
     private var comboDown = false
     var isDancing: Bool { return dance != nil }
 
+    private var hostDrawX: CGFloat?   // host x in canvas points as last drawn (play + dance included)
     fileprivate struct Scaling { var start: TimeInterval; var appearing: Bool }
     private var hostScaling: Scaling?
     private var hostVisible = true
@@ -1528,6 +1529,9 @@ final class PetView: NSView {
         let t = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in self?.tick() }
         RunLoop.main.add(t, forMode: .common)
         frame30 = t
+        // The timer alone is up to 33 ms late, and a click in that gap would reach the app underneath.
+        NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged]) { [weak self] _ in self?.pollMouse() }
+        NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { [weak self] e in self?.pollMouse(); return e }
     }
 
     private func tick() {
@@ -1536,7 +1540,12 @@ final class PetView: NSView {
         pollMouse()
         let idle = hostDriver.state == .sleeping && guests.isEmpty && poofs.isEmpty && hostScaling == nil && !hovering && !dragging && dance == nil
         if idle && frameCount % 3 != 0 { return }
-        let dirty = stripRect.insetBy(dx: -60 * scale, dy: -30 * scale)   // only the strip repaints, not the screen
+        refresh()
+    }
+
+    /// Repaints the strip (and where it was), not the whole screen. A speech note can run far past the strip.
+    func refresh() {
+        let dirty = stripRect.insetBy(dx: -(note == nil ? 60 : 300) * scale, dy: -30 * scale)
         setNeedsDisplay(dirty.union(lastDirty))
         lastDirty = dirty
     }
@@ -1544,8 +1553,8 @@ final class PetView: NSView {
     /// Where the pets stand, in view coordinates (host first).
     private func petRects() -> [NSRect] {
         let (s, ox, oy) = layout()
-        let xs = [hostX + (lastPlay?.hostDX ?? 0)] + guests.map { slotX(slot(of: $0)) + ($0.play?.visDX ?? 0) }
-        return xs.map { NSRect(x: ox + ($0 - 72) * s, y: oy, width: 144 * s, height: 176 * s) }
+        let xs = [hostDrawX ?? hostX] + guests.map { $0.x ?? slotX(slot(of: $0)) }
+        return xs.map { NSRect(x: ox + ($0 - 90) * s, y: oy, width: 180 * s, height: 176 * s) }   // a pet spans x 16...172 of its slot
     }
 
     /// The window ignores the mouse except over a pet (or while dragging), so the rest of the screen stays usable.
@@ -1671,9 +1680,9 @@ final class PetView: NSView {
         let p = convert(event.locationInWindow, from: nil)
         let (s, ox, _) = layout()
         let cx = (p.x - ox) / s
-        var best = abs(cx - (hostX + (lastPlay?.hostDX ?? 0))), hit: String? = nil
+        var best = abs(cx - (hostDrawX ?? hostX)), hit: String? = nil
         for g in guests {
-            let d = abs(cx - (slotX(slot(of: g)) + (g.play?.visDX ?? 0)))
+            let d = abs(cx - (g.x ?? slotX(slot(of: g))))
             if d < best { best = d; hit = g.id }
         }
         return hit
@@ -1734,6 +1743,7 @@ final class PetView: NSView {
         let danceH = dance?.frame(at: t)
         let danceV = dance?.frame(at: t, partner: true)
         let hostXNow = hostX + (play?.hostDX ?? 0) + (danceH?.dx ?? 0)
+        hostDrawX = hostXNow
 
         if away { drawBed(ctx, x: hostX, t: t) }
         if hostVisible {
@@ -1756,6 +1766,7 @@ final class PetView: NSView {
             let p = g.play
             let visXNow = slotX(slot(of: g)) + (p?.visDX ?? 0) + (danceV?.dx ?? 0)
             visXs.append(visXNow)
+            g.x = visXNow
             var a = g.driver.compute(t: t, hovering: false, dragging: false, look: lookVector(forCanvasX: visXNow))
             if let p = p {
                 a.hop += p.visHop
@@ -2477,6 +2488,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         window.isReleasedWhenClosed = false
         window.isExcludedFromWindowsMenu = true
         window.ignoresMouseEvents = true   // PetView lets clicks in only over a pet
+        window.acceptsMouseMovedEvents = true
 
         pet = PetView(frame: NSRect(origin: .zero, size: size))
         pet.scale = sizeFactor
@@ -2670,12 +2682,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
     /// Puts the strip's bottom-left at `o` (screen coordinates). The window is the whole screen the host stands on.
     func place(_ o: NSPoint) {
-        let o = clamped(o)
+        var o = clamped(o)
         let host = NSPoint(x: o.x + pet.hostX * pet.scale, y: o.y + 60 * pet.scale)
         let screen = NSScreen.screens.first { $0.frame.contains(host) } ?? window.screen ?? NSScreen.main ?? NSScreen.screens[0]
+        if NSScreen.screens.count > 1 {   // never straddle two displays: the guests would be cut off at the seam
+            let f = screen.frame, r = pet.stripRect
+            if r.width <= f.width { o.x = min(max(o.x, f.minX), f.maxX - r.width) }
+            if r.height <= f.height { o.y = min(max(o.y, f.minY), f.maxY - r.height) }
+        }
         if window.frame != screen.frame { window.setFrame(screen.frame, display: false) }
         pet.stripOrigin = CGPoint(x: o.x - screen.frame.minX, y: o.y - screen.frame.minY)
-        pet.needsDisplay = true
+        pet.refresh()
     }
     @objc func screensChanged() {
         place(stripOriginOnScreen)
