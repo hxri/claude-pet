@@ -1256,8 +1256,9 @@ final class PlayDirector {
     private var start: TimeInterval
     private var duration: TimeInterval = 2.6
     private static let slot: CGFloat = 180, near: CGFloat = 96
+    private let calm: Bool   // second and later guests don't chase across the pets between them
 
-    init(dir: CGFloat, at t: TimeInterval) { self.dir = dir; start = t }
+    init(dir: CGFloat, at t: TimeInterval, calm: Bool = false) { self.dir = dir; self.calm = calm; start = t }
 
     private func ease(_ p: CGFloat) -> CGFloat { let q = min(max(p, 0), 1); return q * q * (3 - 2 * q) }
     private func hops(_ p: CGFloat, count: CGFloat, height: CGFloat) -> CGFloat { return height * abs(sin(p * count * .pi)) }
@@ -1330,8 +1331,9 @@ final class PlayDirector {
     }
 
     private func next(at t: TimeInterval) {
-        var k = Kind.allCases.randomElement() ?? .rest
-        while k == kind { k = Kind.allCases.randomElement() ?? .rest }
+        let kinds = Kind.allCases.filter { !(calm && $0 == .chase) }
+        var k = kinds.randomElement() ?? .rest
+        while k == kind { k = kinds.randomElement() ?? .rest }
         kind = k
         start = t
         switch k {
@@ -1432,14 +1434,17 @@ final class PetView: NSView {
     var hostSlot = 0
     let host = PetArtist(spec: PetSpec.fallback)
     let hostDriver = AnimDriver()
-    private(set) var visitor: PetArtist?
-    let visitorDriver = AnimDriver()
-    private var director: PlayDirector?
+    final class Guest {
+        let id: String, artist: PetArtist, driver = AnimDriver()
+        fileprivate var scaling: Scaling?, director: PlayDirector?, play: PlayDirector.Frame?
+        init(id: String, artist: PetArtist) { self.id = id; self.artist = artist }
+    }
+    private(set) var guests: [Guest] = []
     private(set) var away = false
     private var awayText: String?
     var frozenTime: TimeInterval? = nil
     var onClick: (() -> Void)?
-    var onVisitorClick: (() -> Void)?
+    var onVisitorClick: ((String) -> Void)?
     var onRightClick: ((NSEvent) -> Void)?
     var onMoved: (() -> Void)?
     private var lastPlay: PlayDirector.Frame?
@@ -1447,10 +1452,9 @@ final class PetView: NSView {
     private var comboDown = false
     var isDancing: Bool { return dance != nil }
 
-    private struct Scaling { var start: TimeInterval; var appearing: Bool }
+    fileprivate struct Scaling { var start: TimeInterval; var appearing: Bool }
     private var hostScaling: Scaling?
     private var hostVisible = true
-    private var visitorScaling: Scaling?
     private struct Poof { var x: CGFloat; var start: TimeInterval }
     private var poofs: [Poof] = []
     private var note: (text: String, until: TimeInterval)?
@@ -1477,7 +1481,7 @@ final class PetView: NSView {
     private func tick() {
         frameCount += 1
         pollDanceKeys()
-        let idle = hostDriver.state == .sleeping && visitor == nil && poofs.isEmpty && hostScaling == nil && !hovering && !dragging && dance == nil
+        let idle = hostDriver.state == .sleeping && guests.isEmpty && poofs.isEmpty && hostScaling == nil && !hovering && !dragging && dance == nil
         if idle && frameCount % 3 != 0 { return }
         needsDisplay = true
     }
@@ -1502,12 +1506,20 @@ final class PetView: NSView {
     var canvasSize: CGSize { return CGSize(width: PetView.slotWidth * CGFloat(slots), height: PetView.canvasHeight) }
     func slotX(_ i: Int) -> CGFloat { return CX + CGFloat(i) * PetView.slotWidth }
     var hostX: CGFloat { return slotX(hostSlot) }
-    var visitorSlot: Int { return 1 - hostSlot }
+    /// Guests stand in arrival order next to the host, on the side with room.
+    func slot(of g: Guest) -> Int {
+        let i = guests.firstIndex { $0 === g } ?? 0
+        return max(0, hostSlot == 0 ? i + 1 : slots - 2 - i)
+    }
 
     // State changes ------------------------------------------------------------
 
     func setHostState(_ s: PetState) { hostDriver.set(s, at: now); host.state = s }
-    func setVisitorState(_ s: PetState) { visitorDriver.set(s, at: now); visitor?.state = s; visitor?.tagColor = s.color }
+    func setVisitorState(_ id: String, _ s: PetState) {
+        guard let g = guests.first(where: { $0.id == id }) else { return }
+        g.driver.set(s, at: now); g.artist.state = s; g.artist.tagColor = s.color
+    }
+    func visitorState(_ id: String) -> PetState { return guests.first { $0.id == id }?.driver.state ?? .ready }
 
     func departHost(label: String) {
         let t = now
@@ -1529,27 +1541,28 @@ final class PetView: NSView {
         hostScaling = Scaling(start: now, appearing: true)
         poofs.append(Poof(x: hostX, start: now))
     }
-    func arriveVisitor(_ artist: PetArtist, state: PetState) {
+    func arriveVisitor(id: String, _ artist: PetArtist, state: PetState) {
         let t = now
         artist.showName = true
         artist.state = state
         artist.tagColor = state.color
-        visitor = artist
-        visitorDriver.set(state, at: t)
-        visitorScaling = Scaling(start: t, appearing: true)
-        poofs.append(Poof(x: slotX(visitorSlot), start: t))
-        director = PlayDirector(dir: visitorSlot > hostSlot ? 1 : -1, at: t + 0.8)
+        let g = Guest(id: id, artist: artist)
+        g.driver.set(state, at: t)
+        g.scaling = Scaling(start: t, appearing: true)
+        guests.append(g)
+        let slot = self.slot(of: g)
+        poofs.append(Poof(x: slotX(slot), start: t))
+        g.director = PlayDirector(dir: slot > hostSlot ? 1 : -1, at: t + 0.8, calm: guests.count > 1)
     }
-    func leaveVisitor() {
-        guard visitor != nil, visitorScaling?.appearing != false else { return }
+    func leaveVisitor(_ id: String) {
+        guard let g = guests.first(where: { $0.id == id && $0.scaling?.appearing != false }) else { return }
         let t = now
-        visitorScaling = Scaling(start: t, appearing: false)
-        poofs.append(Poof(x: slotX(visitorSlot) + (director?.frame(at: t).visDX ?? 0), start: t))
-        director = nil
+        g.scaling = Scaling(start: t, appearing: false)
+        poofs.append(Poof(x: slotX(slot(of: g)) + (g.director?.frame(at: t).visDX ?? 0), start: t))
+        g.director = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            guard let s = self, let sc = s.visitorScaling, !sc.appearing else { return }
-            s.visitor = nil
-            s.visitorScaling = nil
+            guard let s = self, g.scaling?.appearing == false else { return }
+            s.guests.removeAll { $0 === g }
         }
     }
     func showNote(_ text: String, seconds: Double = 3) { note = (text, now + seconds) }
@@ -1582,27 +1595,30 @@ final class PetView: NSView {
     }
     override func mouseUp(with event: NSEvent) {
         if dragging { NSCursor.pop(); dragging = false; onMoved?() }
-        else if visitorHit(event) { onVisitorClick?() }
+        else if let id = visitorHit(event) { onVisitorClick?(id) }
         else { onClick?() }
     }
     override func rightMouseDown(with event: NSEvent) { onRightClick?(event) }
 
-    private func visitorHit(_ event: NSEvent) -> Bool {
-        guard visitor != nil else { return false }
+    /// The guest nearest the click, or nil when the host is.
+    private func visitorHit(_ event: NSEvent) -> String? {
         let p = convert(event.locationInWindow, from: nil)
         let (s, ox, _) = layout()
         let cx = (p.x - ox) / s
-        let vx = slotX(visitorSlot) + (lastPlay?.visDX ?? 0)
-        let hx = hostX + (lastPlay?.hostDX ?? 0)
-        return abs(cx - vx) < abs(cx - hx)
+        var best = abs(cx - (hostX + (lastPlay?.hostDX ?? 0))), hit: String? = nil
+        for g in guests {
+            let d = abs(cx - (slotX(slot(of: g)) + (g.play?.visDX ?? 0)))
+            if d < best { best = d; hit = g.id }
+        }
+        return hit
     }
 
-    /// Anchor for the visitor's card: the visiting pet's head.
-    var visitorHeadRect: NSRect {
-        guard let v = visitor else { return headRect }
+    /// Anchor for a guest's card: the visiting pet's head.
+    func visitorHeadRect(_ id: String) -> NSRect {
+        guard let g = guests.first(where: { $0.id == id }) else { return headRect }
         let (s, ox, oy) = layout()
-        let l = v.layout
-        let vx = slotX(visitorSlot) + (lastPlay?.visDX ?? 0)
+        let l = g.artist.layout
+        let vx = slotX(slot(of: g)) + (g.play?.visDX ?? 0)
         return NSRect(x: ox + (vx - l.hr) * s, y: oy + (l.hy - l.hr) * s, width: 2 * l.hr * s, height: 2 * l.hr * s)
     }
 
@@ -1650,12 +1666,12 @@ final class PetView: NSView {
         ctx.setLineJoin(.round)
         ctx.setLineCap(.round)
 
-        let play = director?.frame(at: t)
+        for g in guests { g.play = g.director?.frame(at: t) }
+        let play = guests.first?.play   // the host plays with the first guest
         lastPlay = play
         let danceH = dance?.frame(at: t)
         let danceV = dance?.frame(at: t, partner: true)
         let hostXNow = hostX + (play?.hostDX ?? 0) + (danceH?.dx ?? 0)
-        let visXNow = slotX(visitorSlot) + (play?.visDX ?? 0) + (danceV?.dx ?? 0)
 
         if away { drawBed(ctx, x: hostX, t: t) }
         if hostVisible {
@@ -1667,30 +1683,35 @@ final class PetView: NSView {
             }
             var facing = play?.hostFacing ?? 1
             if let d = danceH { applyDance(d, to: &a); facing = d.facing }
-            host.showName = visitor != nil
+            host.showName = !guests.isEmpty
             ctx.saveGState()
             ctx.translateBy(x: hostXNow - CX, y: 0)
             host.draw(ctx, a, t: t, facing: facing, scale: scaleFactor(hostScaling, t))
             ctx.restoreGState()
         }
-        if let v = visitor {
-            var a = visitorDriver.compute(t: t, hovering: false, dragging: false, look: lookVector(forCanvasX: visXNow))
-            if let p = play {
+        var visXs: [CGFloat] = []
+        for g in guests {
+            let p = g.play
+            let visXNow = slotX(slot(of: g)) + (p?.visDX ?? 0) + (danceV?.dx ?? 0)
+            visXs.append(visXNow)
+            var a = g.driver.compute(t: t, hovering: false, dragging: false, look: lookVector(forCanvasX: visXNow))
+            if let p = p {
                 a.hop += p.visHop
                 a.tilt += p.visTilt
                 if p.visHappy && a.eyeStyle == .open { a.eyeStyle = .happy }
             }
-            var facing = play?.visFacing ?? 1
+            var facing = p?.visFacing ?? 1
             if let d = danceV { applyDance(d, to: &a); facing = d.facing }
             ctx.saveGState()
             ctx.translateBy(x: visXNow - CX, y: 0)
-            v.draw(ctx, a, t: t, facing: facing, scale: scaleFactor(visitorScaling, t))
+            g.artist.draw(ctx, a, t: t, facing: facing, scale: scaleFactor(g.scaling, t))
             ctx.restoreGState()
         }
-        if let p = play, p.hearts { drawHearts(ctx, x: (hostXNow + visXNow) / 2, y: 140, t: t) }
+        if let p = play, p.hearts, let vx = visXs.first { drawHearts(ctx, x: (hostXNow + vx) / 2, y: 140, t: t) }
+        for (g, vx) in zip(guests, visXs).dropFirst() where g.play?.hearts == true { drawHearts(ctx, x: vx, y: 140, t: t) }
         if dance != nil && hostVisible {
             drawNotes(ctx, x: hostXNow, t: t)
-            if visitor != nil { drawNotes(ctx, x: visXNow, t: t + 0.7) }
+            for vx in visXs { drawNotes(ctx, x: vx, t: t + 0.7) }
         }
         drawPoofs(ctx, t)
         drawNote(ctx, t)
@@ -2281,9 +2302,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     var awayPhase: AwayPhase = .none
     var awayLink: Link?
     var awayPeer: PetNet.Peer?
-    var visitorLink: Link?
-    var visitorIdentity: PetIdentity?
-    var visitorSince: Date?
+    struct Visitor { let link: Link; let identity: PetIdentity; let since: Date }
+    var visitors: [Visitor] = []
+    static let maxVisitors = 3
     var pendingLinks: [Link] = []
     var netTimer: Timer?
     var lastPing = Date.distantPast
@@ -2396,7 +2417,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         pet = PetView(frame: NSRect(origin: .zero, size: size))
         pet.autoresizingMask = [.width, .height]
         pet.onClick = { [weak self] in self?.togglePopover() }
-        pet.onVisitorClick = { [weak self] in self?.showVisitorCard() }
+        pet.onVisitorClick = { [weak self] id in self?.showVisitorCard(id) }
         pet.onRightClick = { [weak self] e in self?.showMenu(e) }
         pet.onMoved = { [weak self] in self?.savePosition() }
         window.contentView = pet
@@ -2428,7 +2449,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         if awayPhase == .away { awayLink?.send(["t": "recall"]) }
-        visitorLink?.send(["t": "bye"])
+        visitors.forEach { $0.link.send(["t": "bye"]) }
         usleep(150_000)
     }
 
@@ -2498,8 +2519,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         case .none:
             break
         }
-        if let v = visitorIdentity {
-            return VisitInfo(text: "\(v.label) is visiting", button: "Send home", action: { [weak self] in self?.dismissVisitor() })
+        if let v = visitors.first {
+            let many = visitors.count > 1
+            return VisitInfo(text: many ? "\(visitors.count) pets are visiting" : "\(v.identity.label) is visiting", button: many ? "Send all home" : "Send home",
+                             action: { [weak self] in self?.visitors.map { $0.link }.forEach { self?.dismissVisitor($0) } })
         }
         let peers = net.peers
         if peers.count == 1, let p = peers.first {
@@ -2530,13 +2553,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         statusVC = nil
     }
 
-    func showVisitorCard() {
-        guard let id = visitorIdentity else { togglePopover(); return }
+    func showVisitorCard(_ id: String) {
+        guard let v = visitors.first(where: { $0.identity.id == id }) else { togglePopover(); return }
         if let p = popover, p.isShown { p.performClose(nil); return }
         let vc = VisitorCardController()
-        vc.render(identity: id, state: pet.visitorDriver.state, since: visitorSince ?? Date()) { [weak self] in
+        vc.render(identity: v.identity, state: pet.visitorState(id), since: v.since) { [weak self] in
             self?.popover?.performClose(nil)
-            self?.dismissVisitor()
+            self?.dismissVisitor(v.link)
         }
         let p = NSPopover()
         p.contentViewController = vc
@@ -2546,7 +2569,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover = p
         statusVC = nil
         NSApp.activate(ignoringOtherApps: true)
-        p.show(relativeTo: pet.visitorHeadRect, of: pet, preferredEdge: .maxY)
+        p.show(relativeTo: pet.visitorHeadRect(id), of: pet, preferredEdge: .maxY)
     }
 
     // Position & size --------------------------------------------------------
@@ -2579,16 +2602,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         window.setFrameOrigin(clamped(window.frame.origin))
     }
 
-    /// Switches between one and two pet slots, keeping the host pet where it is on screen.
+    /// Switches the number of pet slots (the host plus its guests), keeping the host pet where it is on screen.
     func setSlots(_ n: Int) {
         guard n != pet.slots else { return }
         let f = sizeFactor
         let old = window.frame
         let hostScreenX = old.minX + pet.hostX * f
         var hostSlot = 0
-        if n == 2 {
+        if n > 1 {
             let screen = window.screen ?? NSScreen.main ?? NSScreen.screens[0]
-            hostSlot = hostScreenX < screen.frame.midX ? 0 : 1
+            hostSlot = hostScreenX < screen.frame.midX ? 0 : n - 1
         }
         pet.hostSlot = hostSlot
         pet.slots = n
@@ -2627,8 +2650,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if awayPhase == .away {
             m.addItem(withTitle: "Call \(identity.name) back", action: #selector(callBackAction), keyEquivalent: "").target = self
         }
-        if let v = visitorIdentity {
-            m.addItem(withTitle: "Send \(v.name) home", action: #selector(dismissVisitorAction), keyEquivalent: "").target = self
+        for v in visitors {
+            let it = m.addItem(withTitle: "Send \(v.identity.name) home", action: #selector(dismissVisitorAction(_:)), keyEquivalent: "")
+            it.target = self
+            it.representedObject = v.identity.id
         }
         let av = m.addItem(withTitle: "Allow visitors", action: #selector(toggleVisitors), keyEquivalent: "")
         av.target = self
@@ -2687,7 +2712,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         sendPet(to: peers[sender.tag])
     }
     @objc func callBackAction() { callBack() }
-    @objc func dismissVisitorAction() { dismissVisitor() }
+    @objc func dismissVisitorAction(_ sender: NSMenuItem) {
+        if let v = visitors.first(where: { $0.identity.id == sender.representedObject as? String }) { dismissVisitor(v.link) }
+    }
     @objc func askNameAction() { askName() }
     @objc func toggleVisitors() { allowVisitors = !allowVisitors }
     @objc func pickPet(_ sender: NSMenuItem) {
@@ -2802,7 +2829,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             pet.departHost(label: "visiting \(awayPeer?.identity.name ?? "a friend")")
             lastSentState = store.petState
         case "busy":
-            pet.showNote("\(awayPeer?.identity.name ?? "That pet") already has a visitor")
+            pet.showNote("\(awayPeer?.identity.name ?? "That pet") can't take a visitor right now")
             awayLink?.close()
         case "bye":
             comeHome()
@@ -2862,18 +2889,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             case "hello":
                 ident = PetIdentity(dict: msg)
             case "visit":
-                if self.allowVisitors, self.visitorLink == nil, let id = ident {
+                if self.allowVisitors, self.visitors.count < AppDelegate.maxVisitors, let id = ident, !self.visitors.contains(where: { $0.identity.id == id.id }) {
                     self.acceptVisitor(id, link: link, state: PetState.named(msg["state"] as? String ?? "ready"))
                 } else {
                     link.send(["t": "busy"])
                     link.close(after: 0.5)
                 }
             case "state", "ping":
-                if self.visitorLink === link, let s = msg["state"] as? String { self.pet.setVisitorState(PetState.named(s)) }
+                if let v = self.visitors.first(where: { $0.link === link }), let s = msg["state"] as? String { self.pet.setVisitorState(v.identity.id, PetState.named(s)) }
                 if t == "ping" { link.send(["t": "pong"]) }
             case "recall":
                 link.send(["t": "bye"])
-                if self.visitorLink === link { self.removeVisitor() }
+                self.removeVisitor(link)
                 link.close(after: 0.5)
             default:
                 break
@@ -2882,43 +2909,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         link.onClose = { [weak self, weak link] in
             guard let self = self else { return }
             self.pendingLinks.removeAll { $0 === link }
-            if let link = link, self.visitorLink === link { self.removeVisitor() }
+            if let link = link { self.removeVisitor(link) }
         }
         link.start()
     }
 
     private func acceptVisitor(_ id: PetIdentity, link: Link, state: PetState) {
-        visitorLink = link
-        visitorIdentity = id
-        visitorSince = Date()
-        setSlots(2)
+        visitors.append(Visitor(link: link, identity: id, since: Date()))
+        setSlots(1 + visitors.count)
         let artist = PetArtist(spec: id.spec ?? PetSpec.builtin("rabbit") ?? PetSpec.fallback)
         artist.name = id.name
-        pet.arriveVisitor(artist, state: state)
+        pet.arriveVisitor(id: id.id, artist, state: state)
         link.send(["t": "welcome"])
         writeNetState()
         refreshPopover()
     }
 
-    private func removeVisitor() {
-        guard visitorIdentity != nil else { return }
-        pet.leaveVisitor()
-        visitorLink = nil
-        visitorIdentity = nil
-        visitorSince = nil
+    private func removeVisitor(_ link: Link) {
+        guard let v = visitors.first(where: { $0.link === link }) else { return }
+        pet.leaveVisitor(v.identity.id)
+        visitors.removeAll { $0.link === link }
         if statusVC == nil, let p = popover, p.isShown { p.performClose(nil) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-            guard let self = self, self.visitorIdentity == nil, self.pet.visitor == nil else { return }
-            self.setSlots(1)
+            guard let self = self, self.pet.guests.count == self.visitors.count else { return }
+            self.setSlots(1 + self.visitors.count)
         }
         writeNetState()
         refreshPopover()
     }
 
-    func dismissVisitor() {
-        guard let l = visitorLink else { return }
+    func dismissVisitor(_ l: Link) {
         l.send(["t": "bye"])
-        removeVisitor()
+        removeVisitor(l)
         l.close(after: 0.5)
     }
 
@@ -2930,9 +2952,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             if now.timeIntervalSince(l.lastSeen) > 25 { l.close() }
             else if ping { l.send(["t": "ping", "state": store.petState.name]) }
         }
-        if let l = visitorLink {
-            if now.timeIntervalSince(l.lastSeen) > 25 { l.close() }
-            else if ping { l.send(["t": "ping"]) }
+        for v in visitors {
+            if now.timeIntervalSince(v.link.lastSeen) > 25 { v.link.close() }
+            else if ping { v.link.send(["t": "ping"]) }
         }
         if ping { writeNetState() }
     }
@@ -2959,7 +2981,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                     pet.showNote("No pet called “\(body)” nearby")
                 }
             case "recall": callBack()
-            case "dismiss": dismissVisitor()
+            case "dismiss": visitors.map { $0.link }.forEach { dismissVisitor($0) }
             case "dance": pet.startDance(seconds: Double(body) ?? 8)
             case "snapshot": snapshot(to: body.isEmpty ? petHome + "/snapshot" + (profile.isEmpty ? "" : "-" + profile) + ".png" : body)
             case "name": if !body.isEmpty { setPetName(body) }
@@ -2994,7 +3016,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             "ts": Int(Date().timeIntervalSince1970),
         ]
         d["away"] = awayPhase == .none ? NSNull() : ["phase": "\(awayPhase)", "peer": awayPeer?.identity.dict ?? [:]]
-        d["visitor"] = visitorIdentity?.dict ?? NSNull()
+        d["visitor"] = visitors.first?.identity.dict ?? NSNull()
+        d["visitors"] = visitors.map { $0.identity.dict }
         d["error"] = net.lastError ?? NSNull()
         if let data = try? JSONSerialization.data(withJSONObject: d, options: [.prettyPrinted, .sortedKeys]) {
             try? data.write(to: URL(fileURLWithPath: netStatePath))
