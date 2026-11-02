@@ -21,6 +21,8 @@ let serviceType = "_claudepet._tcp"
 /// CLAUDEPET_PROFILE=<name> runs a second, independent instance (used for testing visits on one Mac).
 let profile = ProcessInfo.processInfo.environment["CLAUDEPET_PROFILE"] ?? ""
 let defaults: UserDefaults = profile.isEmpty ? UserDefaults.standard : (UserDefaults(suiteName: bundleID + "." + profile) ?? .standard)
+/// Menu option: the pet occasionally pulls out a keyboard while working.
+var typingKeyboard = defaults.object(forKey: "typingKeyboard") == nil ? true : defaults.bool(forKey: "typingKeyboard")
 let controlDir = petHome + (profile.isEmpty ? "/control" : "/control-" + profile)
 let netStatePath = petHome + (profile.isEmpty ? "/net-state.json" : "/net-state-" + profile + ".json")
 
@@ -551,19 +553,21 @@ final class AnimDriver {
             a.eyeScale = 0.92
             a.lookY -= 1.3
             // Now and then the pet pulls out a keyboard and types for a few seconds.
-            if nextTyping < stateChangedAt { nextTyping = stateChangedAt + Double.random(in: 5...12) }
-            if t >= nextTyping {
-                typingStart = t
-                typingEnd = t + Double.random(in: 3...6)
-                nextTyping = typingEnd + Double.random(in: 8...20)
-            }
-            if forceTyping { typingStart = t - 1; typingEnd = t + 10 }
-            a.typing = CGFloat(min(1, max(0, min(t - typingStart, typingEnd - t) / 0.35)))
-            if a.typing > 0 {
-                let k = CGFloat(sin(t * 2 * .pi * 9))
-                a.pawL += a.typing * (max(0, k) - a.pawL)
-                a.pawR += a.typing * (max(0, -k) - a.pawR)
-                a.lookY -= 0.7 * a.typing
+            if typingKeyboard || forceTyping {
+                if nextTyping < stateChangedAt { nextTyping = stateChangedAt + Double.random(in: 5...12) }
+                if t >= nextTyping {
+                    typingStart = t
+                    typingEnd = t + Double.random(in: 3...6)
+                    nextTyping = typingEnd + Double.random(in: 8...20)
+                }
+                if forceTyping { typingStart = t - 1; typingEnd = t + 10 }
+                a.typing = CGFloat(min(1, max(0, min(t - typingStart, typingEnd - t) / 0.35)))
+                if a.typing > 0 {
+                    let k = CGFloat(sin(t * 2 * .pi * 9))
+                    a.pawL += a.typing * (max(0, k) - a.pawL)
+                    a.pawR += a.typing * (max(0, -k) - a.pawR)
+                    a.lookY -= 0.7 * a.typing
+                }
             }
         case .waiting:
             a.tail = 0.6 * CGFloat(sin(t * 2 * .pi * 0.9))
@@ -2695,6 +2699,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             it.target = self
             it.representedObject = v.identity.id
         }
+        let kb = m.addItem(withTitle: "Typing keyboard", action: #selector(toggleKeyboard), keyEquivalent: "")
+        kb.target = self
+        kb.state = typingKeyboard ? .on : .off
         let av = m.addItem(withTitle: "Allow visitors", action: #selector(toggleVisitors), keyEquivalent: "")
         av.target = self
         av.state = allowVisitors ? .on : .off
@@ -2757,6 +2764,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
     @objc func askNameAction() { askName() }
     @objc func toggleVisitors() { allowVisitors = !allowVisitors }
+    @objc func toggleKeyboard() { typingKeyboard = !typingKeyboard; defaults.set(typingKeyboard, forKey: "typingKeyboard") }
     @objc func pickPet(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
         petFile = id

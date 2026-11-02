@@ -4,7 +4,7 @@ A small animated desktop pet for macOS that mirrors what your [Claude Code](http
 sessions are doing, and that can visit a friend's pet when your laptops are near each other.
 
 - A rabbit (or cat) sits on your desktop. Drag it anywhere.
-- It types while Claude works (now and then it pulls out a tiny keyboard), hops when it's your turn, perks up with a "!" when Claude needs
+- It types while Claude works (now and then it pulls out a tiny keyboard; right-click → **Typing keyboard** turns that off), hops when it's your turn, perks up with a "!" when Claude needs
   you, and naps when nothing is running. The collar tag is the status light.
 - Click it for the status card: every session (by its conversation title), its state and last tool, model, context use,
   cost, and your 5-hour / weekly usage.
