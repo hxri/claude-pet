@@ -2716,11 +2716,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
         if window.frame != screen.frame { window.setFrame(screen.frame, display: false) }
         pet.stripOrigin = CGPoint(x: o.x - screen.frame.minX, y: o.y - screen.frame.minY)
-        // taller than the canvas: ears and bubbles rise above it during hops
-        inputWindow.setFrame(NSRect(origin: o, size: NSSize(width: pet.stripRect.width, height: pet.stripRect.height + 40 * pet.scale)), display: false)
+        // bigger than the canvas: ears and bubbles rise above it during hops
+        let pad = 24 * pet.scale   // bubbles slide out sideways too
+        inputWindow.setFrame(NSRect(x: o.x - pad, y: o.y, width: pet.stripRect.width + 2 * pad, height: pet.stripRect.height + 40 * pet.scale), display: false)
         pet.refresh()
     }
     @objc func screensChanged() {
+        // a narrower display may no longer hold the strip: send the newest guests home until it does
+        while let v = visitors.last, !stripFits(visitors.count + 1) { dismissVisitor(v.link) }
         place(stripOriginOnScreen)
     }
 
@@ -2862,7 +2865,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
     @objc func pickSize(_ sender: NSMenuItem) {
         let hostScreenX = stripOriginOnScreen.x + pet.hostX * pet.scale
+        let oldSize = sizeIndex
         sizeIndex = sender.tag
+        if !stripFits(pet.slots) { sizeIndex = oldSize; pet.showNote("Not enough room for that size with visitors"); return }
         pet.scale = sizeFactor
         place(NSPoint(x: hostScreenX - pet.hostX * sizeFactor, y: stripOriginOnScreen.y))
         savePosition()
