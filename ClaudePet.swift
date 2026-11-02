@@ -1515,7 +1515,6 @@ final class PetView: NSView {
     var now: TimeInterval { return frozenTime ?? Date().timeIntervalSince(epoch) }
     private var hovering = false
     private var dragging = false
-    private var pressed = false   // button is down on a pet: keep taking events even if the cursor slips off
     private var dragOrigin = NSPoint.zero
     private var dragStartOrigin = NSPoint.zero   // global strip origin when the drag began
     private var lastDirty = NSRect.zero
@@ -1529,15 +1528,12 @@ final class PetView: NSView {
         let t = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in self?.tick() }
         RunLoop.main.add(t, forMode: .common)
         frame30 = t
-        // The timer alone is up to 33 ms late, and a click in that gap would reach the app underneath.
-        NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged]) { [weak self] _ in self?.pollMouse() }
-        NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { [weak self] e in self?.pollMouse(); return e }
     }
 
     private func tick() {
         frameCount += 1
         pollDanceKeys()
-        pollMouse()
+        pollHover()
         let idle = hostDriver.state == .sleeping && guests.isEmpty && poofs.isEmpty && hostScaling == nil && !hovering && !dragging && dance == nil
         if idle && frameCount % 3 != 0 { return }
         refresh()
@@ -1550,21 +1546,17 @@ final class PetView: NSView {
         lastDirty = dirty
     }
 
-    /// Where the pets stand, in view coordinates (host first).
+    /// Where the pets stand, in view coordinates (host first), for hover.
     private func petRects() -> [NSRect] {
         let (s, ox, oy) = layout()
         let xs = [hostDrawX ?? hostX] + guests.map { $0.x ?? slotX(slot(of: $0)) }
         return xs.map { NSRect(x: ox + ($0 - 90) * s, y: oy, width: 180 * s, height: 176 * s) }   // a pet spans x 16...172 of its slot
     }
 
-    /// The window ignores the mouse except over a pet (or while dragging), so the rest of the screen stays usable.
-    private func pollMouse() {
+    /// The screen-sized window only draws (it ignores the mouse); this is just the hover reaction.
+    private func pollHover() {
         guard let w = window else { return }
-        let m = convert(w.mouseLocationOutsideOfEventStream, from: nil)
-        let rects = petRects()
-        hovering = rects.first?.contains(m) ?? false
-        let ignore = !(pressed || dragging || rects.contains { $0.contains(m) })
-        if w.ignoresMouseEvents != ignore { w.ignoresMouseEvents = ignore }
+        hovering = petRects().first?.contains(convert(w.mouseLocationOutsideOfEventStream, from: nil)) ?? false
     }
 
     /// Control+Option held together starts a dance; it keeps going while held (at least 4 s).
@@ -1655,7 +1647,6 @@ final class PetView: NSView {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { return true }
 
     override func mouseDown(with event: NSEvent) {
-        pressed = true
         dragOrigin = NSEvent.mouseLocation
         let wo = window?.frame.origin ?? .zero
         dragStartOrigin = NSPoint(x: wo.x + stripOrigin.x, y: wo.y + stripOrigin.y)
@@ -1668,7 +1659,6 @@ final class PetView: NSView {
         if dragging { onDrag?(NSPoint(x: dragStartOrigin.x + dx, y: dragStartOrigin.y + dy)) }
     }
     override func mouseUp(with event: NSEvent) {
-        pressed = false
         if dragging { NSCursor.pop(); dragging = false; onMoved?() }
         else if let id = visitorHit(event) { onVisitorClick?(id) }
         else { onClick?() }
@@ -1677,7 +1667,8 @@ final class PetView: NSView {
 
     /// The guest nearest the click, or nil when the host is.
     private func visitorHit(_ event: NSEvent) -> String? {
-        let p = convert(event.locationInWindow, from: nil)
+        // The click arrives in the strip-sized input window, so ask for the cursor in this view's window.
+        let p = window.map { convert($0.mouseLocationOutsideOfEventStream, from: nil) } ?? .zero
         let (s, ox, _) = layout()
         let cx = (p.x - ox) / s
         var best = abs(cx - (hostDrawX ?? hostX)), hit: String? = nil
@@ -2352,6 +2343,18 @@ final class VisitorCardController: NSViewController {
 
 // MARK: - Window & app
 
+/// Catches the mouse over the strip of pets (as the old pet window did); the screen-sized window above only draws.
+final class InputView: NSView {
+    weak var target: PetView?
+    override var acceptsFirstResponder: Bool { return true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { return true }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .openHand) }
+    override func mouseDown(with event: NSEvent) { target?.mouseDown(with: event) }
+    override func mouseDragged(with event: NSEvent) { target?.mouseDragged(with: event) }
+    override func mouseUp(with event: NSEvent) { target?.mouseUp(with: event) }
+    override func rightMouseDown(with event: NSEvent) { target?.rightMouseDown(with: event) }
+}
+
 final class PetWindow: NSWindow {
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { return frameRect }
     override var canBecomeKey: Bool { return true }
@@ -2359,7 +2362,9 @@ final class PetWindow: NSWindow {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
-    var window: PetWindow!
+    var window: PetWindow!        // covers the screen, draws the pets, ignores the mouse
+    var inputWindow: PetWindow!   // exactly the strip of pets, takes clicks and drags
+    var inputView: InputView!
     var pet: PetView!
     let store = SessionStore()
     var popover: NSPopover?
@@ -2487,8 +2492,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         window.isMovableByWindowBackground = false
         window.isReleasedWhenClosed = false
         window.isExcludedFromWindowsMenu = true
-        window.ignoresMouseEvents = true   // PetView lets clicks in only over a pet
-        window.acceptsMouseMovedEvents = true
+        window.ignoresMouseEvents = true
 
         pet = PetView(frame: NSRect(origin: .zero, size: size))
         pet.scale = sizeFactor
@@ -2499,10 +2503,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         pet.onMoved = { [weak self] in self?.savePosition() }
         pet.onDrag = { [weak self] in self?.place($0) }
         window.contentView = pet
+
+        inputWindow = PetWindow(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: false)
+        inputWindow.isOpaque = false
+        inputWindow.backgroundColor = NSColor.black.withAlphaComponent(0.005)   // not fully clear, so the strip reliably takes clicks
+        inputWindow.hasShadow = false
+        inputWindow.level = .floating
+        inputWindow.collectionBehavior = window.collectionBehavior
+        inputWindow.isReleasedWhenClosed = false
+        inputWindow.isExcludedFromWindowsMenu = true
+        inputView = InputView(frame: .zero)
+        inputView.target = pet
+        inputWindow.contentView = inputView
         loadPet()
 
         restorePosition()
         window.orderFrontRegardless()
+        inputWindow.orderFrontRegardless()
 
         watch(sessionsDir) { [weak self] in self?.scheduleRefresh() }
         watch(statusDir) { [weak self] in self?.scheduleRefresh() }
@@ -2692,6 +2709,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
         if window.frame != screen.frame { window.setFrame(screen.frame, display: false) }
         pet.stripOrigin = CGPoint(x: o.x - screen.frame.minX, y: o.y - screen.frame.minY)
+        inputWindow.setFrame(NSRect(origin: o, size: pet.stripRect.size), display: false)
         pet.refresh()
     }
     @objc func screensChanged() {
@@ -2796,7 +2814,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         m.addItem(withTitle: "Open pet folder", action: #selector(openFolder), keyEquivalent: "").target = self
         m.addItem(.separator())
         m.addItem(withTitle: "Quit Claude Pet", action: #selector(quit), keyEquivalent: "").target = self
-        NSMenu.popUpContextMenu(m, with: event, for: pet)
+        NSMenu.popUpContextMenu(m, with: event, for: inputView)
     }
 
     @objc func menuStatus() { if popover == nil { togglePopover() } }
