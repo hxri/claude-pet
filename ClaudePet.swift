@@ -2312,7 +2312,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     // Preferences ------------------------------------------------------------
 
-    static let sizes: [(String, CGFloat)] = [("Small", 0.72), ("Medium", 0.95), ("Large", 1.3)]
+    static let sizes: [(String, CGFloat)] = [("Small", 0.72), ("Medium", 0.95), ("Large", 1.3), ("Extra small", 0.5)]  // saved as an index: append, never reorder
     var sizeIndex: Int {
         get { return min(max(defaults.integer(forKey: "size"), 0), AppDelegate.sizes.count - 1) }
         set { defaults.set(newValue, forKey: "size") }
@@ -2686,7 +2686,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         m.addItem(coatItem)
 
         let sizeMenu = NSMenu()
-        for (i, s) in AppDelegate.sizes.enumerated() {
+        for (i, s) in AppDelegate.sizes.enumerated().sorted(by: { $0.element.1 < $1.element.1 }) {
             let it = sizeMenu.addItem(withTitle: s.0, action: #selector(pickSize(_:)), keyEquivalent: "")
             it.target = self; it.tag = i; it.state = (i == sizeIndex) ? .on : .off
         }
