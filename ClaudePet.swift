@@ -24,6 +24,8 @@ let defaults: UserDefaults = profile.isEmpty ? UserDefaults.standard : (UserDefa
 /// Menu option: the pet occasionally pulls out a keyboard while working.
 /// Menu option: the pet reacts to how a session went (cheers after long work, droops on an error) and to how much usage is left.
 var reactions = defaults.object(forKey: "reactions") == nil ? true : defaults.bool(forKey: "reactions")
+/// Menu option: soft system sounds when a session needs you, finishes long work or fails. Off by default.
+var sounds = defaults.bool(forKey: "sounds")
 var typingKeyboard = defaults.object(forKey: "typingKeyboard") == nil ? true : defaults.bool(forKey: "typingKeyboard")
 let controlDir = petHome + (profile.isEmpty ? "/control" : "/control-" + profile)
 let netStatePath = petHome + (profile.isEmpty ? "/net-state.json" : "/net-state-" + profile + ".json")
@@ -2718,6 +2720,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
     }
 
+    private var lastChime = Date.distantPast
+    /// A soft system sound, at most one every 6 s, only if the Sounds option is on.
+    private func chime(_ name: String) {
+        guard sounds, Date().timeIntervalSince(lastChime) > 6, let snd = NSSound(named: NSSound.Name(name)) else { return }
+        lastChime = Date()
+        snd.volume = 0.5
+        snd.play()
+    }
+
     /// What we saw of each session last time, to tell when something just happened to it.
     private var seen: [String: (state: PetState, event: String, workStart: Date?)] = [:]
 
@@ -2728,9 +2739,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             let old = seen[s.id]
             var workStart = old?.workStart
             if s.state == .working && old?.state != .working { workStart = now }
-            if let o = old, reactions, !pet.away {
-                if s.event == "Stop" && o.event != "Stop", let ws = o.workStart, now.timeIntervalSince(ws) >= 45 { pet.react(.cheer) }
-                if s.event == "StopFailure" && o.event != "StopFailure" { pet.react(.droop) }
+            if let o = old, !pet.away {
+                let finished = s.event == "Stop" && o.event != "Stop" && (o.workStart.map { now.timeIntervalSince($0) >= 45 } ?? false)
+                let failed = s.event == "StopFailure" && o.event != "StopFailure"
+                if reactions && finished { pet.react(.cheer) }
+                if reactions && failed { pet.react(.droop) }
+                if finished { chime("Glass") }
+                else if failed { chime("Basso") }
+                else if s.state == .attention && o.state != .attention { chime("Ping") }
             }
             seen[s.id] = (s.state, s.event, s.state == .working ? workStart : nil)
         }
@@ -2943,6 +2959,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let rc = m.addItem(withTitle: "Reactions", action: #selector(toggleReactions), keyEquivalent: "")
         rc.target = self
         rc.state = reactions ? .on : .off
+        let sd = m.addItem(withTitle: "Sounds", action: #selector(toggleSounds), keyEquivalent: "")
+        sd.target = self
+        sd.state = sounds ? .on : .off
         let kb = m.addItem(withTitle: "Typing keyboard", action: #selector(toggleKeyboard), keyEquivalent: "")
         kb.target = self
         kb.state = typingKeyboard ? .on : .off
@@ -3009,6 +3028,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     @objc func askNameAction() { askName() }
     @objc func toggleVisitors() { allowVisitors = !allowVisitors }
     @objc func toggleReactions() { reactions = !reactions; defaults.set(reactions, forKey: "reactions") }
+    @objc func toggleSounds() { sounds = !sounds; defaults.set(sounds, forKey: "sounds") }
     @objc func toggleKeyboard() { typingKeyboard = !typingKeyboard; defaults.set(typingKeyboard, forKey: "typingKeyboard") }
     @objc func pickPet(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
