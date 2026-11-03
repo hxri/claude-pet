@@ -3216,7 +3216,7 @@ func renderPNG(state: String, path: String, coat: Int?, points: CGFloat, petArg:
     view.setHostState(PetState.named(forced != nil ? "working" : state))
     view.hostDriver.forceTyping = forced
     view.host.tagColor = view.host.state.color
-    view.frozenTime = 1.0
+    view.frozenTime = 1.0 + (forced?.since ?? 0)   // typing@<s>: the clock moves with it, so paws and keys animate across frames
     let scale: CGFloat = 2
     guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width * scale), pixelsHigh: Int(size.height * scale),
                                      bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
