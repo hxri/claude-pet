@@ -3228,9 +3228,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
         return nil
     }
+    /// The Claude app's own id for a session ("local_..."), found from the hook's session id in the app's session records.
+    private func claudeAppSessionId(for cliId: String) -> String? {
+        let dir = NSHomeDirectory() + "/Library/Application Support/Claude/claude-code-sessions"
+        guard let out = Process.run("/usr/bin/grep", ["-rlF", "--include=local_*.json", "\"cliSessionId\":\"" + cliId + "\"", dir]) else { return nil }
+        for line in out.split(separator: "\n") {
+            let name = (String(line) as NSString).lastPathComponent
+            if name.hasPrefix("local_"), name.hasSuffix(".json") { return String(name.dropLast(5)) }
+        }
+        return nil
+    }
     /// Brings forward the terminal or app a session runs in. Terminal and iTerm2 also select the right tab.
     func goTo(_ s: Session) {
         guard let app = hostApp(of: s) else { pet.showNote("Couldn't find the window for that session"); return }
+        if app.bundleIdentifier == "com.anthropic.claudefordesktop" {   // the Claude app: open that very session through its link
+            DispatchQueue.global().async {
+                let local = self.claudeAppSessionId(for: s.id)
+                DispatchQueue.main.async {
+                    if let id = local, let url = URL(string: "claude://code/continue?session=" + id) { NSWorkspace.shared.open(url) }
+                    else { app.activate(options: [.activateIgnoringOtherApps]) }
+                }
+            }
+            return
+        }
         app.activate(options: [.activateIgnoringOtherApps])
         let tty = Process.run("/bin/ps", ["-o", "tty=", "-p", String(s.pid)])?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !tty.isEmpty, tty != "??" else { return }
@@ -3787,6 +3807,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             case "dismiss": visitors.map { $0.link }.forEach { dismissVisitor($0) }
             case "gather": pet.gather()
             case "scatter": pet.scatter()
+            case "goto": goToMostUrgent()
             case "snapshot-all": snapshot(to: body.isEmpty ? petHome + "/snapshot-all.png" : body, whole: true)
             case "dance": pet.startDance(seconds: Double(body) ?? 8)
             case "snapshot": snapshot(to: body.isEmpty ? petHome + "/snapshot" + (profile.isEmpty ? "" : "-" + profile) + ".png" : body)
