@@ -80,6 +80,30 @@ enum PetState: Int, Comparable {
     }
 }
 
+/// What a running tool looks like to the pet: the prop it holds while the tool runs.
+enum ToolKind: CaseIterable {
+    case read, search, web, shell, edit
+    init?(tool: String?) {
+        switch tool ?? "" {
+        case "Read", "NotebookRead": self = .read
+        case "Grep", "Glob", "LS": self = .search
+        case "WebSearch", "WebFetch": self = .web
+        case "Bash", "PowerShell": self = .shell
+        case "Edit", "MultiEdit", "Write", "NotebookEdit": self = .edit
+        default: return nil
+        }
+    }
+    var name: String {
+        switch self {
+        case .read: return "read"
+        case .search: return "search"
+        case .web: return "web"
+        case .shell: return "shell"
+        case .edit: return "edit"
+        }
+    }
+}
+
 struct Session {
     var id: String
     var cwd: String
@@ -160,6 +184,18 @@ final class SessionStore {
 
     /// Most urgent state across sessions (drives the collar tag colour).
     var topState: PetState { return sessions.map { $0.state }.max() ?? .sleeping }
+
+    /// The tool the most recently active working session is running (or just ran), for the pet's prop.
+    var activeTool: ToolKind? {
+        let now = Date()
+        for s in sessions.filter({ $0.state == .working }).sorted(by: { $0.updated > $1.updated }) {
+            let age = now.timeIntervalSince(s.updated)
+            let running = s.event == "PreToolUse" && age < 120   // a session that died mid-tool must not keep its prop
+            let justRan = (s.event == "PostToolUse" || s.event == "PostToolUseFailure") && age < 2.5
+            if running || justRan, let k = ToolKind(tool: s.tool) { return k }
+        }
+        return nil
+    }
 
     /// What the pet animates. A pet left alone at the prompt dozes off after a while.
     var petState: PetState {
@@ -488,6 +524,8 @@ struct Anim {
     var feet: CGFloat = 0                        // 0…1 while being carried
     var typing: CGFloat = 0                      // 0…1 paws on the keyboard, typing (working only)
     var kbOn = false                             // the keyboard is out
+    var prop: ToolKind?                          // the tool prop in hand
+    var propIn: CGFloat = 0, propOut: CGFloat = 0, propT: CGFloat = 0   // 0…1 coming out / going away, seconds in hand
     var kbIn: CGFloat = 0, kbOut: CGFloat = 0    // 0…1 whipped out / whisked away
     var nose: CGFloat = 0                        // -1…1 twitch
     var headTilt: CGFloat = 0                    // -1…1
@@ -508,6 +546,14 @@ final class AnimDriver {
     private var nextTwitch: TimeInterval = 4, twitchStart: TimeInterval = -1
     private var typingStart: TimeInterval = 0, typingEnd: TimeInterval = 0, nextTyping: TimeInterval = 0
     var forceTyping: (since: TimeInterval, remain: TimeInterval)?   // --render typing@since/remain
+    private(set) var tool: ToolKind?
+    private var toolSince: TimeInterval = 0, lastTool: ToolKind?, toolEnd: TimeInterval = -10
+    func setTool(_ k: ToolKind?, at t: TimeInterval) {
+        if k == tool { return }
+        if let old = tool, k == nil { lastTool = old; toolEnd = t }
+        tool = k
+        if k != nil { toolSince = t }
+    }
 
     func set(_ s: PetState, at t: TimeInterval) {
         if s != state { state = s; stateChangedAt = t; typingEnd = 0 }
@@ -561,7 +607,7 @@ final class AnimDriver {
             a.eyeScale = 0.92
             a.lookY -= 1.3
             // Now and then the pet whips out a keyboard, types for a few seconds, then whisks it away.
-            if typingKeyboard || forceTyping != nil {
+            if (typingKeyboard && tool == nil) || forceTyping != nil {   // a tool prop is in hand instead of the keyboard
                 if nextTyping < stateChangedAt { nextTyping = stateChangedAt + Double.random(in: 5...12) }
                 if t >= nextTyping {
                     typingStart = t
@@ -603,6 +649,18 @@ final class AnimDriver {
             let ph = t.truncatingRemainder(dividingBy: 3.0)
             if ph < 1.2 { a.tilt = (3.5 * .pi / 180) * CGFloat(sin(ph * 2 * .pi * 5)) }
             a.mouth = .open
+        }
+        if state == .working {   // the prop for the tool that is running: held up, looked at
+            if let k = tool {
+                a.prop = k; a.propT = CGFloat(t - toolSince); a.propIn = CGFloat(min(1, (t - toolSince) / 0.3))
+            } else if let k = lastTool, t - toolEnd < 0.25 {
+                a.prop = k; a.propT = CGFloat(toolEnd - toolSince); a.propIn = 1; a.propOut = CGFloat((t - toolEnd) / 0.25)
+            }
+            if a.prop != nil && a.kbOn == false {
+                let hold = a.propOut > 0 ? 1 - a.propOut : a.propIn
+                a.pawL = max(a.pawL, 0.7 * hold); a.pawR = max(a.pawR, 0.7 * hold)
+                a.lookY -= 0.8 * hold
+            }
         }
         if hovering && !dragging && state != .sleeping {
             a.earL = max(a.earL, 0.7); a.earR = max(a.earR, 0.7)
@@ -928,6 +986,7 @@ final class PetArtist {
         for p in spec.parts { drawPart(ctx, p, a, mirrored: false) }
         ctx.restoreGState()
         if a.kbOn { drawKeyboard(ctx, a, t, scale: scale) }
+        if let k = a.prop { drawProp(ctx, k, a, t, scale: scale) }
 
         ctx.saveGState()
         ctx.setAlpha(scale)
@@ -989,6 +1048,85 @@ final class PetArtist {
             board(i: max(0, a.kbIn - 0.06), o: 0, alpha: 0.3, keys: false)
         }
         board(i: a.kbIn, o: 0, alpha: 1, keys: a.typing > 0)
+    }
+
+    /// The prop for the tool that is running, held in front of the pet: pops out with a spring, goes away fast.
+    private func drawProp(_ ctx: CGContext, _ kind: ToolKind, _ a: Anim, _ t: TimeInterval, scale: CGFloat) {
+        let spring: (CGFloat) -> CGFloat = { x in let c: CGFloat = 0.9; return 1 + (c + 1) * pow(x - 1, 3) + c * pow(x - 1, 2) }
+        let grow = a.propOut > 0 ? 1 - a.propOut : spring(a.propIn)
+        let size = scale * (0.3 + 0.7 * grow)
+        let ink = rgb(70, 66, 80), paper = rgb(252, 250, 244)
+        ctx.saveGState()
+        ctx.translateBy(x: CX, y: layout.gy + 24 + (1 - min(1, a.propIn)) * 10 + 1.2 * CGFloat(sin(t * 2 * .pi * 1.3)))
+        ctx.scaleBy(x: size, y: size)
+        ctx.setAlpha((a.propOut > 0 ? 1 - a.propOut : min(1, a.propIn * 2)) * scale)
+        ctx.setLineJoin(.round); ctx.setLineCap(.round)
+        func poly(_ pts: [(CGFloat, CGFloat)], fill: NSColor?, stroke: NSColor? = nil, width: CGFloat = 1.2) {
+            ctx.beginPath(); ctx.move(to: CGPoint(x: pts[0].0, y: pts[0].1))
+            for q in pts.dropFirst() { ctx.addLine(to: CGPoint(x: q.0, y: q.1)) }
+            ctx.closePath()
+            if let f = fill { ctx.setFillColor(f.cgColor) }
+            if let sk = stroke { ctx.setStrokeColor(sk.cgColor); ctx.setLineWidth(width) }
+            ctx.drawPath(using: fill != nil && stroke != nil ? .fillStroke : (fill != nil ? .fill : .stroke))
+        }
+        switch kind {
+        case .read:   // an open book, a page turns now and then
+            ctx.setFillColor(rgb(124, 66, 78).cgColor)
+            ctx.addPath(CGPath(roundedRect: CGRect(x: -25, y: -13, width: 50, height: 29), cornerWidth: 3, cornerHeight: 3, transform: nil)); ctx.fillPath()
+            poly([(-1, -11), (-23, -8), (-23, 12), (-1, 15)], fill: paper, stroke: ink)
+            poly([(1, -11), (23, -8), (23, 12), (1, 15)], fill: paper, stroke: ink)
+            ctx.setStrokeColor(rgb(170, 166, 176).cgColor); ctx.setLineWidth(1)
+            for i in 0..<3 {
+                let y = CGFloat(8 - i * 6)
+                ctx.move(to: CGPoint(x: -19, y: y)); ctx.addLine(to: CGPoint(x: -6, y: y - 0.5))
+                ctx.move(to: CGPoint(x: 6, y: y - 0.5)); ctx.addLine(to: CGPoint(x: 19, y: y))
+            }
+            ctx.strokePath()
+            let ph = (t * 0.7).truncatingRemainder(dividingBy: 1), c = CGFloat(cos(ph * .pi))
+            poly([(0, -11), (22 * c, -8), (22 * c, 12), (0, 15)], fill: paper.withAlphaComponent(0.92), stroke: ink)
+        case .search:   // a magnifying glass sweeping side to side
+            let x = 14 * CGFloat(sin(t * 2 * .pi * 0.8))
+            ctx.setStrokeColor(rgb(120, 84, 60).cgColor); ctx.setLineWidth(4.5)
+            ctx.move(to: CGPoint(x: x + 8, y: -5)); ctx.addLine(to: CGPoint(x: x + 18, y: -15)); ctx.strokePath()
+            ctx.setFillColor(rgb(170, 215, 255, 0.45).cgColor); ctx.setStrokeColor(ink.cgColor); ctx.setLineWidth(3)
+            ctx.addEllipse(in: CGRect(x: x - 11, y: -9, width: 22, height: 22)); ctx.drawPath(using: .fillStroke)
+        case .web:   // a spinning globe
+            ctx.setFillColor(rgb(95, 160, 225).cgColor); ctx.setStrokeColor(rgb(40, 90, 150).cgColor); ctx.setLineWidth(1.6)
+            ctx.addEllipse(in: CGRect(x: -15, y: -12, width: 30, height: 30)); ctx.drawPath(using: .fillStroke)
+            ctx.setStrokeColor(rgb(255, 255, 255, 0.75).cgColor); ctx.setLineWidth(1.1)
+            for i in 0..<3 {
+                let rx = 15 * abs(CGFloat(cos(t * 1.6 + Double(i) * .pi / 3)))
+                ctx.strokeEllipse(in: CGRect(x: -rx, y: -12, width: 2 * rx, height: 30))
+            }
+            for y in [CGFloat(-5), 3, 11] { ctx.move(to: CGPoint(x: -14 * sqrt(max(0, 1 - pow((y - 3) / 15, 2))), y: y)); ctx.addLine(to: CGPoint(x: 14 * sqrt(max(0, 1 - pow((y - 3) / 15, 2))), y: y)) }
+            ctx.strokePath()
+        case .shell:   // a terminal window with a prompt and a blinking cursor
+            ctx.setFillColor(rgb(32, 34, 44).cgColor)
+            ctx.addPath(CGPath(roundedRect: CGRect(x: -25, y: -13, width: 50, height: 30), cornerWidth: 4, cornerHeight: 4, transform: nil)); ctx.fillPath()
+            ctx.setFillColor(rgb(58, 60, 76).cgColor); ctx.fill(CGRect(x: -25, y: 10, width: 50, height: 7))
+            for (i, col) in [rgb(255, 95, 86), rgb(255, 189, 46), rgb(39, 201, 63)].enumerated() {
+                ctx.setFillColor(col.cgColor); ctx.fillEllipse(in: CGRect(x: -21.5 + CGFloat(i) * 6, y: 12.2, width: 3.4, height: 3.4))
+            }
+            ctx.setStrokeColor(rgb(120, 230, 150).cgColor); ctx.setLineWidth(1.8)
+            ctx.move(to: CGPoint(x: -20, y: 1)); ctx.addLine(to: CGPoint(x: -16, y: 4)); ctx.addLine(to: CGPoint(x: -20, y: 7)); ctx.strokePath()
+            ctx.setStrokeColor(rgb(150, 156, 176).cgColor); ctx.setLineWidth(1.4)
+            let n = Int(t * 2) % 3
+            ctx.move(to: CGPoint(x: -12, y: 4)); ctx.addLine(to: CGPoint(x: -12 + CGFloat(10 + n * 6), y: 4))
+            ctx.move(to: CGPoint(x: -20, y: -5)); ctx.addLine(to: CGPoint(x: -20 + CGFloat(18 - n * 3), y: -5)); ctx.strokePath()
+            if Int(t * 2.4) % 2 == 0 { ctx.setFillColor(rgb(120, 230, 150).cgColor); ctx.fill(CGRect(x: -12 + CGFloat(10 + n * 6) + 3, y: 1.5, width: 5, height: 5)) }
+        case .edit:   // a pencil writing on a sheet
+            ctx.setFillColor(paper.cgColor); ctx.setStrokeColor(ink.cgColor); ctx.setLineWidth(1.2)
+            ctx.addPath(CGPath(roundedRect: CGRect(x: -19, y: -13, width: 38, height: 31), cornerWidth: 3, cornerHeight: 3, transform: nil)); ctx.drawPath(using: .fillStroke)
+            let prog = CGFloat((t * 0.45).truncatingRemainder(dividingBy: 1))
+            ctx.setStrokeColor(rgb(110, 108, 124).cgColor); ctx.setLineWidth(1.3)
+            ctx.move(to: CGPoint(x: -14, y: 9)); ctx.addLine(to: CGPoint(x: 14, y: 9))
+            ctx.move(to: CGPoint(x: -14, y: 3)); ctx.addLine(to: CGPoint(x: -14 + 28 * prog, y: 3)); ctx.strokePath()
+            ctx.translateBy(x: -14 + 28 * prog, y: 3); ctx.rotate(by: -0.75)
+            poly([(0, 0), (4, -2.4), (4, 2.4)], fill: rgb(222, 190, 150))
+            ctx.setFillColor(rgb(255, 205, 60).cgColor); ctx.fill(CGRect(x: 4, y: -2.4, width: 11, height: 4.8))
+            ctx.setFillColor(rgb(240, 150, 160).cgColor); ctx.fill(CGRect(x: 15, y: -2.4, width: 3.5, height: 4.8))
+        }
+        ctx.restoreGState()
     }
 
     // Spec evaluation ---------------------------------------------------------
@@ -1687,6 +1825,7 @@ final class PetView: NSView {
     // State changes ------------------------------------------------------------
 
     func setHostState(_ s: PetState) { hostDriver.set(s, at: now); host.state = s }
+    func setHostTool(_ k: ToolKind?) { hostDriver.setTool(k, at: now) }
     func setVisitorState(_ id: String, _ s: PetState) {
         guard let g = guests.first(where: { $0.id == id }) else { return }
         g.driver.set(s, at: now); g.artist.state = s; g.artist.tagColor = s.color
@@ -2988,6 +3127,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         noticeChanges()
         let st = store.petState
         pet.setHostState(st)
+        pet.setHostTool(store.activeTool)
         pet.tiredness = tiredMood ? tiredness() : 0
         pet.host.tagColor = store.topState.color
         pet.host.sessionCount = store.sessions.count
@@ -3630,7 +3770,6 @@ func renderPNG(state: String, path: String, coat: Int?, points: CGFloat, petArg:
         let nums = state.dropFirst(7).split(separator: "/").compactMap { Double($0) }
         forced = (nums.first ?? 1, nums.count > 1 ? nums[1] : 10)
     }
-    // cheer@<s into the reaction>, droop@<s>, tired@<0..1>[/<s>]
     var reactSince: Double?
     if state.hasPrefix("cheer") || state.hasPrefix("droop") { reactSince = Double(state.split(separator: "@").last ?? "1") ?? 1 }
     var tiredK: Double?, tiredSince: Double?
@@ -3639,14 +3778,21 @@ func renderPNG(state: String, path: String, coat: Int?, points: CGFloat, petArg:
         tiredK = nums.first ?? 1
         tiredSince = nums.count > 1 ? nums[1] : 0
     }
-    let shown = forced != nil ? "working" : (state.hasPrefix("cheer") ? "waiting" : (state.hasPrefix("droop") ? "attention" : (tiredK != nil ? "ready" : state)))
+    // read@<s>, search@<s>, web@<s>, shell@<s>, edit@<s>: the prop for that tool, <s> seconds after it came out
+    var toolKind: ToolKind?, toolAge: Double = 1
+    if let k = ToolKind.allCases.first(where: { state.hasPrefix($0.name) }) {
+        toolKind = k
+        toolAge = Double(state.split(separator: "@").last ?? "1") ?? 1
+    }
+    let shown = forced != nil || toolKind != nil ? "working" : (state.hasPrefix("cheer") ? "waiting" : (state.hasPrefix("droop") ? "attention" : (tiredK != nil ? "ready" : state)))
     view.setHostState(PetState.named(shown))
     view.hostDriver.forceTyping = forced
+    if let k = toolKind { view.hostDriver.setTool(k, at: 1.0) }
     if let k = tiredK { view.tiredness = CGFloat(k) }
     view.host.tagColor = view.host.state.color
     if state.hasPrefix("cheer") { view.react(.cheer, at: 1.0) }
     if state.hasPrefix("droop") { view.react(.droop, at: 1.0) }
-    view.frozenTime = 1.0 + (forced?.since ?? reactSince ?? tiredSince ?? 0)   // typing@<s>: the clock moves with it, so paws and keys animate across frames
+    view.frozenTime = 1.0 + (forced?.since ?? reactSince ?? tiredSince ?? (toolKind != nil ? toolAge : 0))   // typing@<s>: the clock moves with it, so paws and keys animate across frames
     let scale: CGFloat = 2
     guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width * scale), pixelsHigh: Int(size.height * scale),
                                      bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
