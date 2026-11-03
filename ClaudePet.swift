@@ -559,17 +559,17 @@ final class AnimDriver {
                 if nextTyping < stateChangedAt { nextTyping = stateChangedAt + Double.random(in: 5...12) }
                 if t >= nextTyping {
                     typingStart = t
-                    typingEnd = t + Double.random(in: 4.5...8)
+                    typingEnd = t + Double.random(in: 5.5...9)
                     nextTyping = typingEnd + Double.random(in: 8...20)
                 }
                 if let f = forceTyping { typingStart = t - f.since; typingEnd = t + f.remain }
                 let ts = t - typingStart, remain = typingEnd - t
                 if ts >= 0 && remain > 0 {
                     a.kbOn = true
-                    a.kbIn = CGFloat(min(1, ts / 0.5))
-                    a.kbOut = CGFloat(min(1, max(0, 1 - remain / 0.4)))
-                    a.typing = CGFloat(min(1, max(0, min(ts - 0.4, remain - 0.3) / 0.2)))   // paws only while it is in hand
-                    let land = min(1, max(0, (ts - 0.3) / 0.25))
+                    a.kbIn = CGFloat(min(1, ts / 0.9))
+                    a.kbOut = CGFloat(min(1, max(0, 1 - remain / 0.6)))
+                    a.typing = CGFloat(min(1, max(0, min(ts - 0.8, remain - 0.5) / 0.2)))   // paws only while it is in hand
+                    let land = min(1, max(0, (ts - 0.6) / 0.3))
                     if land > 0 && land < 1 { a.hop += 5 * CGFloat(sin(land * .pi)) }   // a little hop as it lands
                     if a.typing > 0 {
                         let k = CGFloat(sin(t * 2 * .pi * 9))
@@ -937,8 +937,9 @@ final class PetArtist {
         let w: CGFloat = 70, h: CGFloat = 17
         let home = CGPoint(x: CX, y: layout.gy - 12 + h / 2)
         let away = CGPoint(x: CX + 84, y: layout.gy + 80)
-        func outBack(_ x: CGFloat) -> CGFloat { let c: CGFloat = 1.70158; return 1 + (c + 1) * pow(x - 1, 3) + c * pow(x - 1, 2) }
+        func spring(_ x: CGFloat) -> CGFloat { let c: CGFloat = 0.9; return 1 + (c + 1) * pow(x - 1, 3) + c * pow(x - 1, 2) }   // ease-out, ~4% overshoot
         func outCubic(_ x: CGFloat) -> CGFloat { return 1 - pow(1 - x, 3) }
+        func inCubic(_ x: CGFloat) -> CGFloat { return x * x * x }   // exits ease in
         func lerp(_ p: CGPoint, _ q: CGPoint, _ k: CGFloat) -> CGPoint { return CGPoint(x: p.x + (q.x - p.x) * k, y: p.y + (q.y - p.y) * k) }
         let hit = Int(t * 9)   // one key per paw stroke, on the side of the paw that is coming down
         let keyCol = (sin(t * 2 * .pi * 9) > 0 ? 4 : 0) + hit % 4, keyRow = hit / 4 % 3
@@ -947,22 +948,22 @@ final class PetArtist {
         func board(i: CGFloat, o: CGFloat, alpha: CGFloat, keys: Bool) {
             var pos: CGPoint, angle: CGFloat, size: CGFloat
             if o > 0 {
-                let q = o * o
+                let q = inCubic(o)
                 pos = lerp(home, away, q)
-                angle = q * 2 * .pi
+                angle = q * 2.5 * .pi
                 size = 1 - 0.65 * q
             } else {
-                let e = outBack(i)
+                let e = spring(i)
                 pos = lerp(away, home, e)
                 pos.y += 26 * CGFloat(sin(Double(min(1, i)) * .pi))   // arcs up and over
-                angle = -(1 - outCubic(i)) * 3 * .pi                  // spins about one and a half turns
+                angle = -(1 - outCubic(i)) * 2.5 * .pi                // spins, slowing as it arrives
                 size = 0.35 + 0.65 * min(1, e)
             }
             ctx.saveGState()
             ctx.translateBy(x: pos.x, y: pos.y)
             ctx.rotate(by: angle)
             ctx.scaleBy(x: size * scale, y: size * scale)
-            ctx.setAlpha(alpha * scale)
+            ctx.setAlpha(alpha * scale * (o > 0 ? 1 : min(1, i / 0.2)))   // fades in over the first fifth of the entrance
             ctx.addPath(CGPath(roundedRect: CGRect(x: -w / 2, y: -h / 2, width: w, height: h), cornerWidth: 4, cornerHeight: 4, transform: nil))
             ctx.setFillColor(rgb(58, 60, 72).cgColor)
             ctx.fillPath()
@@ -976,7 +977,7 @@ final class PetArtist {
             ctx.restoreGState()
         }
 
-        if a.kbOut > 0 { board(i: 1, o: a.kbOut, alpha: 1 - a.kbOut * a.kbOut, keys: false); return }
+        if a.kbOut > 0 { board(i: 1, o: a.kbOut, alpha: 1 - pow(a.kbOut, 3), keys: false); return }
         if a.kbIn < 1 {
             board(i: max(0, a.kbIn - 0.12), o: 0, alpha: 0.15, keys: false)   // motion trail
             board(i: max(0, a.kbIn - 0.06), o: 0, alpha: 0.3, keys: false)
