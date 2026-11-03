@@ -22,6 +22,8 @@ let serviceType = "_claudepet._tcp"
 let profile = ProcessInfo.processInfo.environment["CLAUDEPET_PROFILE"] ?? ""
 let defaults: UserDefaults = profile.isEmpty ? UserDefaults.standard : (UserDefaults(suiteName: bundleID + "." + profile) ?? .standard)
 /// Menu option: the pet occasionally pulls out a keyboard while working.
+/// Menu option: the pet reacts to how a session went (cheers after long work, droops on an error) and to how much usage is left.
+var reactions = defaults.object(forKey: "reactions") == nil ? true : defaults.bool(forKey: "reactions")
 var typingKeyboard = defaults.object(forKey: "typingKeyboard") == nil ? true : defaults.bool(forKey: "typingKeyboard")
 let controlDir = petHome + (profile.isEmpty ? "/control" : "/control-" + profile)
 let netStatePath = petHome + (profile.isEmpty ? "/net-state.json" : "/net-state-" + profile + ".json")
@@ -1559,6 +1561,9 @@ final class PetView: NSView {
     private struct Poof { var x: CGFloat; var start: TimeInterval; var y: CGFloat = 0 }
     private var poofs: [Poof] = []
     private var note: (text: String, until: TimeInterval)?
+    enum Reaction { case cheer, droop }
+    private var reaction: (kind: Reaction, start: TimeInterval)?
+    func react(_ kind: Reaction, at start: TimeInterval? = nil) { reaction = (kind, start ?? now) }
 
     private let epoch = Date()
     var now: TimeInterval { return frozenTime ?? Date().timeIntervalSince(epoch) }
@@ -1925,6 +1930,7 @@ final class PetView: NSView {
             }
             var facing = play?.hostFacing ?? 1
             if let d = danceH { applyDance(d, to: &a); facing = d.facing }
+            applyReaction(&a, t)
             host.showName = !guests.isEmpty
             ctx.saveGState()
             ctx.translateBy(x: hostXNow - CX, y: 0)
@@ -1955,6 +1961,9 @@ final class PetView: NSView {
             g.artist.draw(ctx, a, t: t, facing: facing, scale: scaleFactor(g.scaling, t))
             ctx.restoreGState()
         }
+        if let r = reaction, hostVisible {
+            if r.kind == .cheer { drawHearts(ctx, x: hostXNow, y: 128, t: t) } else { drawRain(ctx, x: hostXNow, t: t) }
+        }
         if let p = play, p.hearts, let m = mate, let i = guests.firstIndex(where: { $0 === m }) {
             drawHearts(ctx, x: (hostXNow + visXs[i]) / 2, y: 140, t: t)
         }
@@ -1971,6 +1980,49 @@ final class PetView: NSView {
         }
         drawPoofs(ctx, t)
         drawNote(ctx, t)
+        ctx.restoreGState()
+    }
+
+    private static let reactionLength: TimeInterval = 3.4
+
+    /// A short mood on top of the state: a cheer (hops, happy face, hearts) or a droop (ears down, shiver, rain cloud).
+    private func applyReaction(_ a: inout Anim, _ t: TimeInterval) {
+        guard let r = reaction, hostDriver.state != .sleeping else { return }
+        let p = t - r.start, len = PetView.reactionLength
+        if p > len { reaction = nil; return }
+        let fade = CGFloat(min(1, min(p / 0.3, (len - p) / 0.5)))   // eases in and out
+        switch r.kind {
+        case .cheer:
+            a.hop += abs(CGFloat(sin(p * 2 * .pi * 1.7))) * 12 * CGFloat(max(0, 1 - p / len))
+            a.eyeStyle = .happy
+            a.mouth = .open
+            a.earL += 0.8 * fade; a.earR += 0.8 * fade
+            a.tail = CGFloat(sin(p * 2 * .pi * 4))
+        case .droop:
+            a.earL += fade * (-1 - a.earL); a.earR += fade * (-1 - a.earR)   // all the way down, even from the perked 'needs you' state
+            a.tail *= 1 - fade
+            a.eyeScale *= 1 - 0.3 * fade
+            a.lookY -= 2 * fade
+            a.tilt += CGFloat(sin(p * 2 * .pi * 7)) * 0.025 * fade   // a small shiver
+        }
+    }
+
+    /// A little rain cloud over a drooping pet.
+    private func drawRain(_ ctx: CGContext, x: CGFloat, t: TimeInterval) {
+        guard let r = reaction else { return }
+        let p = t - r.start
+        let a = CGFloat(min(1, min(p / 0.3, (PetView.reactionLength - p) / 0.5)))
+        ctx.saveGState()
+        ctx.setAlpha(a)
+        ctx.setFillColor(rgb(120, 126, 142).cgColor)
+        for (dx, dy, rx) in [(-14, 0, 13), (0, 5, 16), (15, 0, 12)] as [(CGFloat, CGFloat, CGFloat)] {
+            ctx.fillEllipse(in: CGRect(x: x + dx - rx, y: 150 + dy - 8, width: 2 * rx, height: 16))
+        }
+        ctx.setFillColor(rgb(90, 150, 230).cgColor)
+        for i in 0..<4 {
+            let ph = (p * 1.6 + Double(i) * 0.25).truncatingRemainder(dividingBy: 1)
+            ctx.fillEllipse(in: CGRect(x: x - 15 + CGFloat(i) * 10, y: 140 - 38 * CGFloat(ph), width: 3, height: 5))
+        }
         ctx.restoreGState()
     }
 
@@ -2768,8 +2820,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
     }
 
+    /// What we saw of each session last time, to tell when something just happened to it.
+    private var seen: [String: (state: PetState, event: String, workStart: Date?)] = [:]
+
+    /// Reacts to what just happened in a session: a long task finishing, a failed turn.
+    private func noticeChanges() {
+        let now = Date()
+        for s in store.sessions {
+            let old = seen[s.id]
+            var workStart = old?.workStart
+            if s.state == .working && old?.state != .working { workStart = now }
+            if let o = old, reactions, !pet.away {
+                if s.event == "Stop" && o.event != "Stop", let ws = o.workStart, now.timeIntervalSince(ws) >= 45 { pet.react(.cheer) }
+                if s.event == "StopFailure" && o.event != "StopFailure" { pet.react(.droop) }
+            }
+            seen[s.id] = (s.state, s.event, s.state == .working ? workStart : nil)
+        }
+        let live = Set(store.sessions.map { $0.id })
+        seen = seen.filter { live.contains($0.key) }
+    }
+
     func refresh() {
         store.reload()
+        noticeChanges()
         let st = store.petState
         pet.setHostState(st)
         pet.host.tagColor = store.topState.color
@@ -2993,6 +3066,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             it.target = self
             it.representedObject = v.identity.id
         }
+        let rc = m.addItem(withTitle: "Reactions", action: #selector(toggleReactions), keyEquivalent: "")
+        rc.target = self
+        rc.state = reactions ? .on : .off
         let kb = m.addItem(withTitle: "Typing keyboard", action: #selector(toggleKeyboard), keyEquivalent: "")
         kb.target = self
         kb.state = typingKeyboard ? .on : .off
@@ -3060,6 +3136,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     @objc func askNameAction() { askName() }
     @objc func toggleVisitors() { allowVisitors = !allowVisitors }
     @objc func gatherAction() { pet.gather() }
+    @objc func toggleReactions() { reactions = !reactions; defaults.set(reactions, forKey: "reactions") }
     @objc func toggleKeyboard() { typingKeyboard = !typingKeyboard; defaults.set(typingKeyboard, forKey: "typingKeyboard") }
     @objc func pickPet(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
@@ -3388,10 +3465,16 @@ func renderPNG(state: String, path: String, coat: Int?, points: CGFloat, petArg:
         let nums = state.dropFirst(7).split(separator: "/").compactMap { Double($0) }
         forced = (nums.first ?? 1, nums.count > 1 ? nums[1] : 10)
     }
-    view.setHostState(PetState.named(forced != nil ? "working" : state))
+    // cheer@<s into the reaction> and droop@<s>
+    var reactSince: Double?
+    if state.hasPrefix("cheer") || state.hasPrefix("droop") { reactSince = Double(state.split(separator: "@").last ?? "1") ?? 1 }
+    let shown = forced != nil ? "working" : (state.hasPrefix("cheer") ? "waiting" : (state.hasPrefix("droop") ? "attention" : state))
+    view.setHostState(PetState.named(shown))
     view.hostDriver.forceTyping = forced
     view.host.tagColor = view.host.state.color
-    view.frozenTime = 1.0 + (forced?.since ?? 0)   // typing@<s>: the clock moves with it, so paws and keys animate across frames
+    if state.hasPrefix("cheer") { view.react(.cheer, at: 1.0) }
+    if state.hasPrefix("droop") { view.react(.droop, at: 1.0) }
+    view.frozenTime = 1.0 + (forced?.since ?? reactSince ?? 0)   // typing@<s>: the clock moves with it, so paws and keys animate across frames
     let scale: CGFloat = 2
     guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width * scale), pixelsHigh: Int(size.height * scale),
                                      bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
