@@ -1544,6 +1544,7 @@ final class PetView: NSView {
     private var awayText: String?
     var frozenTime: TimeInterval? = nil
     var onClick: (() -> Void)?
+    var onDoubleClick: (() -> Void)?   // double-click on the host: go to the session that needs you
     var onVisitorClick: ((String) -> Void)?
     var onRightClick: ((NSEvent) -> Void)?
     var onMoved: (() -> Void)?
@@ -1930,6 +1931,7 @@ final class PetView: NSView {
     func pressUp(_ event: NSEvent) {
         if dragging { NSCursor.pop(); dragging = false; onMoved?() }
         else if pressKey != "host" { onVisitorClick?(pressKey) }
+        else if event.clickCount >= 2 { onDoubleClick?() }
         else { onClick?() }
     }
     override func rightMouseDown(with event: NSEvent) { onRightClick?(event) }
@@ -2282,10 +2284,16 @@ final class BarView: NSView {
 }
 
 final class StatusViewController: NSViewController {
+    var onGoTo: ((Session) -> Void)?   // the card's Go to button
+    private var sessionsByButton: [ObjectIdentifier: Session] = [:]
     private let stack = NSStackView()
     private let width: CGFloat = 340
     private let inset: CGFloat = 16
     private let padTop: CGFloat = 14, padBottom: CGFloat = 12
+
+    @objc private func goToPressed(_ sender: NSButton) {
+        if let s = sessionsByButton[ObjectIdentifier(sender)] { onGoTo?(s) }
+    }
 
     override func loadView() {
         // The root view is sized by its frame (the popover owns it); only the
@@ -2359,6 +2367,7 @@ final class StatusViewController: NSViewController {
     }
 
     func render(_ store: SessionStore, visit: VisitInfo?) {
+        sessionsByButton = [:]
         for v in stack.arrangedSubviews { stack.removeArrangedSubview(v); v.removeFromSuperview() }
         let now = Date()
         let n = store.sessions.count
@@ -2421,7 +2430,13 @@ final class StatusViewController: NSViewController {
             let name = label(s.displayName, size: 13, weight: .semibold)
             name.toolTip = s.cwd
             let when = label(Fmt.ago(s.updated, now: now), size: 11, color: .tertiaryLabelColor, fixed: true)
-            add(hrow([dot(s.state.color), name, spacer(), when]), to: v)
+            let go = NSButton(title: "Go to", target: self, action: #selector(goToPressed(_:)))
+            go.bezelStyle = .inline
+            go.controlSize = .small
+            go.font = NSFont.systemFont(ofSize: 11)
+            go.toolTip = "Bring forward the terminal or app this session runs in"
+            sessionsByButton[ObjectIdentifier(go)] = s
+            add(hrow([dot(s.state.color), name, spacer(), when, go]), to: v)
 
             let st = label(s.state.title, size: 12, weight: .medium, color: s.state.color, fixed: true)
             let detail = label(s.detail.map { "· " + $0 } ?? "", size: 12, color: .secondaryLabelColor)
@@ -2714,6 +2729,22 @@ final class VisitorCardController: NSViewController {
     }
 }
 
+extension Process {
+    /// Runs a tool and returns its output, or nil if it could not run.
+    static func run(_ path: String, _ args: [String]) -> String? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: path)
+        p.arguments = args
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = Pipe()
+        do { try p.run() } catch { return nil }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return String(data: data, encoding: .utf8)
+    }
+}
+
 // MARK: - Window & app
 
 /// Catches the mouse over one pet; the screen-sized window above only draws.
@@ -2872,6 +2903,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         pet.scale = sizeFactor
         pet.autoresizingMask = [.width, .height]
         pet.onClick = { [weak self] in self?.togglePopover() }
+        pet.onDoubleClick = { [weak self] in self?.goToMostUrgent() }
         pet.onVisitorClick = { [weak self] id in self?.showVisitorCard(id) }
         pet.onRightClick = { [weak self] e in self?.showMenu(e) }
         pet.onMoved = { [weak self] in self?.savePosition() }
@@ -3037,9 +3069,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         return nil
     }
 
+    // Go to a session -----------------------------------------------------------
+
+    /// The parent of a process, or 0.
+    private func parentPid(_ pid: Int32) -> Int32 {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0 else { return 0 }
+        return info.kp_eproc.e_ppid
+    }
+    /// The app a session runs in: the nearest ancestor of the claude process that is an ordinary app (a terminal, an editor, Claude).
+    func hostApp(of s: Session) -> NSRunningApplication? {
+        var pid = s.pid
+        for _ in 0..<16 where pid > 1 {
+            if let app = NSRunningApplication(processIdentifier: pid), app.activationPolicy == .regular { return app }
+            pid = parentPid(pid)
+        }
+        return nil
+    }
+    /// Brings forward the terminal or app a session runs in. Terminal and iTerm2 also select the right tab.
+    func goTo(_ s: Session) {
+        guard let app = hostApp(of: s) else { pet.showNote("Couldn't find the window for that session"); return }
+        app.activate(options: [.activateIgnoringOtherApps])
+        let tty = Process.run("/bin/ps", ["-o", "tty=", "-p", String(s.pid)])?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !tty.isEmpty, tty != "??" else { return }
+        let script: String?
+        switch app.bundleIdentifier ?? "" {
+        case "com.apple.Terminal":
+            script = "tell application \"Terminal\" to repeat with w in windows\nrepeat with t in tabs of w\nif tty of t is \"/dev/\(tty)\" then\nset selected of t to true\nset index of w to 1\nend if\nend repeat\nend repeat"
+        case "com.googlecode.iterm2":
+            script = "tell application \"iTerm2\" to repeat with w in windows\nrepeat with t in tabs of w\nrepeat with x in sessions of t\nif tty of x is \"/dev/\(tty)\" then\nselect t\nselect x\nend if\nend repeat\nend repeat\nend repeat"
+        default:
+            script = nil
+        }
+        if let script = script {   // may ask once for permission to control the terminal, so not on the main thread
+            DispatchQueue.global().async { _ = Process.run("/usr/bin/osascript", ["-e", script]) }
+        }
+    }
+    /// Double-click on the pet: the session that needs you most (needs you, then your turn, then working).
+    func goToMostUrgent() {
+        guard let s = store.sessions.max(by: { ($0.state, $0.updated) < ($1.state, $1.updated) }) else { pet.showNote("No Claude Code sessions running"); return }
+        popover?.performClose(nil)
+        goTo(s)
+    }
+
     func togglePopover() {
         if let p = popover, p.isShown { p.performClose(nil); return }
         let vc = StatusViewController()
+        vc.onGoTo = { [weak self] s in self?.popover?.performClose(nil); self?.goTo(s) }
         vc.render(store, visit: visitInfo())
         let p = NSPopover()
         p.contentViewController = vc

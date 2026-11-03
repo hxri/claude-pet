@@ -20,6 +20,7 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
   <key>LSUIElement</key><true/>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSAppleEventsUsageDescription</key><string>Claude Pet brings forward the Terminal or iTerm2 tab a Claude Code session runs in.</string>
   <key>NSLocalNetworkUsageDescription</key><string>Claude Pet looks for your friends' pets nearby so your pets can visit each other.</string>
   <key>NSBonjourServices</key><array><string>_claudepet._tcp</string></array>
 </dict>
