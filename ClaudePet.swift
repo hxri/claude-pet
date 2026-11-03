@@ -1790,7 +1790,8 @@ final class PetView: NSView {
     func petHitRects() -> [(key: String, rect: NSRect)] {
         return (["host"] + guests.map { $0.id }).map { key in
             let c = groundCentre(key)
-            return (key: key, rect: NSRect(x: c.x - 90 * scale, y: c.y, width: 180 * scale, height: 176 * scale))
+            // a little bigger than the 16...172 art: ears and bubbles rise above it during hops, and bubbles slide out sideways
+            return (key: key, rect: NSRect(x: c.x - 102 * scale, y: c.y, width: 204 * scale, height: 216 * scale))
         }
     }
 
@@ -2574,6 +2575,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     var awayPeer: PetNet.Peer?
     struct Visitor { let link: Link; let identity: PetIdentity; let since: Date }
     var visitors: [Visitor] = []
+    /// A host takes this many visitors at once; the next one is told it is busy. Open to any pet on the network, so it stays bounded.
+    static let maxVisitors = 12
     var pendingLinks: [Link] = []
     var netTimer: Timer?
     var lastPing = Date.distantPast
@@ -3230,7 +3233,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             case "hello":
                 ident = PetIdentity(dict: msg)
             case "visit":
-                if self.allowVisitors, let id = ident, !self.visitors.contains(where: { $0.identity.id == id.id }) {
+                if self.allowVisitors, self.visitors.count < AppDelegate.maxVisitors, let id = ident, !self.visitors.contains(where: { $0.identity.id == id.id }) {
                     self.acceptVisitor(id, link: link, state: PetState.named(msg["state"] as? String ?? "ready"))
                 } else {
                     link.send(["t": "busy"])

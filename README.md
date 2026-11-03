@@ -36,7 +36,7 @@ Both laptops need the pet running and either the same Wi-Fi network or Wi-Fi swi
 1. Right-click your pet → **Nearby pets** → *Send to \<friend's pet\>*.
 2. Your pet poofs away and leaves its bed behind. On your friend's screen the window widens and
    the two pets play: greeting hops, nuzzles with hearts, chasing, zoomies.
-   Any number of pets can visit one host at once: the row grows to fit the screen, and extra visitors
+   Up to 12 pets can visit one host at once: the row grows to fit the screen, and extra visitors
    stand in rows above it. Drag any pet away on its own, right-click → **Gather around** to bring
    them back, and *Send \<pet\> home* sends one back.
 3. Your pet keeps showing *your* Claude status while it's away, so your friend can see when you're
