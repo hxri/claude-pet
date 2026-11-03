@@ -1518,7 +1518,7 @@ final class PetView: NSView {
     static let slotWidth: CGFloat = 180, canvasHeight: CGFloat = 190
     let CX: CGFloat = 84
 
-    var slots = 1 { didSet { refresh() } }
+    var slots = 1 { didSet { refresh(); onLayoutChanged?() } }
     var hostSlot = 0
     let host = PetArtist(spec: PetSpec.fallback)
     let hostDriver = AnimDriver()
@@ -1527,7 +1527,13 @@ final class PetView: NSView {
         fileprivate var scaling: Scaling?, director: PlayDirector?, play: PlayDirector.Frame?, x: CGFloat?
         init(id: String, artist: PetArtist) { self.id = id; self.artist = artist }
     }
-    private(set) var guests: [Guest] = []
+    private(set) var guests: [Guest] = [] {
+        didSet {
+            freeSpots = freeSpots.filter { entry in entry.key == "host" || guests.contains { $0.id == entry.key } }
+            autoSpots = autoSpots.filter { key in guests.contains { $0.id == key } }
+            settleOverflow()
+        }
+    }
     private(set) var away = false
     private var awayText: String?
     var frozenTime: TimeInterval? = nil
@@ -1550,7 +1556,7 @@ final class PetView: NSView {
     fileprivate struct Scaling { var start: TimeInterval; var appearing: Bool }
     private var hostScaling: Scaling?
     private var hostVisible = true
-    private struct Poof { var x: CGFloat; var start: TimeInterval }
+    private struct Poof { var x: CGFloat; var start: TimeInterval; var y: CGFloat = 0 }
     private var poofs: [Poof] = []
     private var note: (text: String, until: TimeInterval)?
 
@@ -1559,7 +1565,12 @@ final class PetView: NSView {
     private var hovering = false
     private var dragging = false
     private var dragOrigin = NSPoint.zero
-    private var dragStartOrigin = NSPoint.zero   // global strip origin when the drag began
+    private var dragStartOrigin = NSPoint.zero   // where the pressed pet was when the drag began (screen points)
+    /// Pets dragged away from their slot: key ("host" or a guest's id) to ground centre on screen.
+    /// A pet not in here stands in its slot on the strip.
+    private(set) var freeSpots: [String: NSPoint] = [:]
+    private var pressKey = "host"               // the pet under the press
+    var onLayoutChanged: (() -> Void)?          // a pet appeared, left or moved: the click areas need updating
     private var lastDirty = NSRect.zero
     private var frame30: Timer?
     private var frameCount = 0
@@ -1577,6 +1588,7 @@ final class PetView: NSView {
         frameCount += 1
         pollDanceKeys()
         pollHover()
+        stepReturn()
         let idle = hostDriver.state == .sleeping && guests.isEmpty && poofs.isEmpty && hostScaling == nil && !hovering && !dragging && dance == nil
         if idle && frameCount % 3 != 0 { return }
         refresh()
@@ -1586,6 +1598,14 @@ final class PetView: NSView {
     func refresh() {
         var dirty = stripRect.insetBy(dx: -(note == nil ? 110 : 300) * scale, dy: -30 * scale)
         dirty.size.height += 80 * scale   // hops stack: a waiting guest mid-chase puts its bubble at y=234 of a 190 canvas
+        // Pets dragged away from the strip are drawn outside it, so their areas need repainting too.
+        let wo = window?.frame.origin ?? .zero
+        for spot in freeSpots.values {
+            var r = NSRect(x: spot.x - wo.x - 90 * scale, y: spot.y - wo.y, width: 180 * scale, height: 176 * scale)
+                .insetBy(dx: -(note == nil ? 110 : 300) * scale, dy: -30 * scale)
+            r.size.height += 80 * scale
+            dirty = dirty.union(r)
+        }
         setNeedsDisplay(dirty.union(lastDirty))
         lastDirty = dirty
     }
@@ -1625,8 +1645,31 @@ final class PetView: NSView {
     var hostX: CGFloat { return slotX(hostSlot) }
     /// Guests stand in arrival order next to the host, on the side with room.
     func slot(of g: Guest) -> Int {
-        let i = guests.firstIndex { $0 === g } ?? 0
+        let i = slottedGuests.firstIndex { $0 === g } ?? 0
         return max(0, hostSlot == 0 ? i + 1 : slots - 2 - i)
+    }
+    /// How many pets fit in the row across the screen; guests beyond that stand free in rows above it.
+    var maxSlots = Int.max { didSet { settleOverflow() } }
+    private var slottedGuests: [Guest] { return Array(guests.prefix(max(0, maxSlots - 1))) }
+    private var autoSpots = Set<String>()   // free spots handed out here, not chosen by dragging
+    private func isOverflow(_ g: Guest) -> Bool { return !slottedGuests.contains { $0 === g } }
+    private func overflowRank(_ g: Guest) -> Int { return max(0, (guests.firstIndex { $0 === g } ?? 0) - max(0, maxSlots - 1)) }
+    /// Where an overflow guest stands: rows above the host's row, filled left to right.
+    private func overflowHome(_ rank: Int) -> NSPoint {
+        let vf = (window?.screen ?? NSScreen.main)?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let host = groundCentre("host")
+        let perRow = max(1, Int(vf.width / (140 * scale)))
+        let row = rank / perRow + 1, col = rank % perRow
+        return NSPoint(x: vf.minX + 90 * scale + CGFloat(col) * 140 * scale,
+                       y: min(host.y + CGFloat(row) * 160 * scale, vf.maxY - 176 * scale))
+    }
+    /// Gives overflow guests a place, and takes it back from guests that now fit a slot.
+    private func settleOverflow() {
+        for g in slottedGuests where autoSpots.contains(g.id) { freeSpots[g.id] = nil; autoSpots.remove(g.id) }
+        for g in guests where isOverflow(g) && freeSpots[g.id] == nil {
+            freeSpots[g.id] = overflowHome(overflowRank(g)); autoSpots.insert(g.id)
+        }
+        onLayoutChanged?()
     }
 
     // State changes ------------------------------------------------------------
@@ -1668,14 +1711,19 @@ final class PetView: NSView {
         g.scaling = Scaling(start: t, appearing: true)
         guests.append(g)
         let slot = self.slot(of: g)
-        poofs.append(Poof(x: slotX(slot), start: t))
+        let spot = freeSpots[g.id].map { canvasPoint($0) }   // an overflow guest arrives where it will stand
+        poofs.append(Poof(x: spot?.x ?? slotX(slot), start: t, y: spot?.y ?? 0))
         g.director = PlayDirector(dir: slot > hostSlot ? 1 : -1, at: t + 0.8, calm: guests.count > 1)
     }
     func leaveVisitor(_ id: String) {
         guard let g = guests.first(where: { $0.id == id && $0.scaling?.appearing != false }) else { return }
         let t = now
         g.scaling = Scaling(start: t, appearing: false)
-        poofs.append(Poof(x: slotX(slot(of: g)) + (g.director?.frame(at: t).visDX ?? 0), start: t))
+        if let f = freeSpots[id].map({ canvasPoint($0) }) {
+            poofs.append(Poof(x: f.x, start: t, y: f.y))
+        } else {
+            poofs.append(Poof(x: slotX(slot(of: g)) + (g.director?.frame(at: t).visDX ?? 0), start: t))
+        }
         g.director = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let s = self, g.scaling?.appearing == false else { return }
@@ -1684,27 +1732,111 @@ final class PetView: NSView {
     }
     func showNote(_ text: String, seconds: Double = 3) { note = (text, now + seconds) }
 
+    // Positions ----------------------------------------------------------------
+
+    /// Gathered pets walk back to their place beside the host, then rejoin the group.
+    private var lastReturnStep: TimeInterval?
+    private var gathering = false
+    private var walkFacing: [String: CGFloat] = [:]   // which way each gathering pet is heading
+    private var walkingKeys = Set<String>()           // pets still on their way home
+    /// Right-click → Gather around: the pets that were dragged away walk back to the group.
+    func gather() { gathering = true }
+    private func stepReturn() {
+        let t = now
+        let dt = CGFloat(min(0.1, max(0, t - (lastReturnStep ?? t))))
+        lastReturnStep = t
+        guard gathering, !freeSpots.isEmpty else { gathering = false; return }
+        var moved = false
+        walkingKeys.removeAll()
+        for key in freeSpots.keys where !(dragging && pressKey == key) {
+            guard let here = freeSpots[key], let g = guests.first(where: { $0.id == key }) else { continue }
+            let overflow = isOverflow(g)
+            let home = overflow ? overflowHome(overflowRank(g)) : slotCentre(g)
+            let dx = home.x - here.x, dy = home.y - here.y
+            let d = hypot(dx, dy)
+            if d < 2 {
+                if overflow { autoSpots.insert(key) } else { freeSpots[key] = nil }
+            } else {
+                let step = min(d, 220 * dt)   // screen points: a wide display is crossed in a few seconds
+                freeSpots[key] = NSPoint(x: here.x + dx / d * step, y: here.y + dy / d * step)
+                if abs(dx) > 1 { walkFacing[key] = dx > 0 ? -1 : 1 }   // facing +1 looks left
+                walkingKeys.insert(key)
+            }
+            moved = true
+        }
+        if walkingKeys.isEmpty { gathering = false }
+        if moved { onLayoutChanged?() }
+    }
+    /// Where a guest stands in its slot, ignoring any walk.
+    private func slotCentre(_ g: Guest) -> NSPoint {
+        let ox = (window?.frame.minX ?? 0) + stripOrigin.x, oy = (window?.frame.minY ?? 0) + stripOrigin.y
+        return NSPoint(x: ox + slotX(slot(of: g)) * scale, y: oy)
+    }
+
+    /// A screen point as canvas coordinates, the space the pets are drawn in.
+    private func canvasPoint(_ p: NSPoint) -> CGPoint {
+        let ox = (window?.frame.minX ?? 0) + stripOrigin.x, oy = (window?.frame.minY ?? 0) + stripOrigin.y
+        return CGPoint(x: (p.x - ox) / scale, y: (p.y - oy) / scale)
+    }
+    /// Where a pet's feet are on screen: its free spot if it was dragged away, else its slot.
+    func groundCentre(_ key: String) -> NSPoint {
+        if let f = freeSpots[key] { return f }
+        let ox = (window?.frame.minX ?? 0) + stripOrigin.x, oy = (window?.frame.minY ?? 0) + stripOrigin.y
+        if key == "host" { return NSPoint(x: ox + hostX * scale, y: oy) }
+        guard let g = guests.first(where: { $0.id == key }) else { return NSPoint(x: ox, y: oy) }
+        return NSPoint(x: ox + slotX(slot(of: g)) * scale, y: oy)
+    }
+    /// Each pet's click area on screen, keyed by pet ("host", or a guest's id).
+    func petHitRects() -> [(key: String, rect: NSRect)] {
+        return (["host"] + guests.map { $0.id }).map { key in
+            let c = groundCentre(key)
+            return (key: key, rect: NSRect(x: c.x - 90 * scale, y: c.y, width: 180 * scale, height: 176 * scale))
+        }
+    }
+
     // Interaction ------------------------------------------------------------
 
     override func resetCursorRects() { addCursorRect(bounds, cursor: .openHand) }
     override var acceptsFirstResponder: Bool { return true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { return true }
 
-    override func mouseDown(with event: NSEvent) {
+    /// Pressing a pet picks it up. Dragging the host moves the strip, and the guests stay where they are;
+    /// dragging a guest moves only that guest.
+    func pressDown(_ event: NSEvent, key: String) {
+        pressKey = key
         dragOrigin = NSEvent.mouseLocation
-        let wo = window?.frame.origin ?? .zero
-        dragStartOrigin = NSPoint(x: wo.x + stripOrigin.x, y: wo.y + stripOrigin.y)
+        if key == "host" {
+            let wo = window?.frame.origin ?? .zero
+            dragStartOrigin = NSPoint(x: wo.x + stripOrigin.x, y: wo.y + stripOrigin.y)
+        } else {
+            dragStartOrigin = groundCentre(key)
+        }
         dragging = false
     }
-    override func mouseDragged(with event: NSEvent) {
+    func pressDragged(_ event: NSEvent) {
         let p = NSEvent.mouseLocation
         let dx = p.x - dragOrigin.x, dy = p.y - dragOrigin.y
-        if !dragging && hypot(dx, dy) > 3 { dragging = true; NSCursor.closedHand.push() }
-        if dragging { onDrag?(NSPoint(x: dragStartOrigin.x + dx, y: dragStartOrigin.y + dy)) }
+        if !dragging && hypot(dx, dy) > 3 {
+            dragging = true; NSCursor.closedHand.push()
+            if pressKey == "host" {   // carrying the host off leaves the guests where they stand
+                for g in guests where freeSpots[g.id] == nil { freeSpots[g.id] = groundCentre(g.id) }
+            }
+        }
+        guard dragging else { return }
+        var to = NSPoint(x: dragStartOrigin.x + dx, y: dragStartOrigin.y + dy)
+        if pressKey == "host" { onDrag?(to); return }
+        if let vf = (window?.screen ?? NSScreen.main)?.visibleFrame {   // a guest stays on the screen it was dropped on
+            to.x = min(max(to.x, vf.minX + 90 * scale), vf.maxX - 90 * scale)
+            to.y = min(max(to.y, vf.minY), vf.maxY - 176 * scale)
+        }
+        freeSpots[pressKey] = to
+        autoSpots.remove(pressKey)
+        onLayoutChanged?()
+        needsDisplay = true
     }
-    override func mouseUp(with event: NSEvent) {
+    func pressUp(_ event: NSEvent) {
         if dragging { NSCursor.pop(); dragging = false; onMoved?() }
-        else if let id = visitorHit(event) { onVisitorClick?(id) }
+        else if pressKey != "host" { onVisitorClick?(pressKey) }
         else { onClick?() }
     }
     override func rightMouseDown(with event: NSEvent) { onRightClick?(event) }
@@ -1728,8 +1860,9 @@ final class PetView: NSView {
         guard let g = guests.first(where: { $0.id == id }) else { return headRect }
         let (s, ox, oy) = layout()
         let l = g.artist.layout
-        let vx = slotX(slot(of: g)) + (g.play?.visDX ?? 0)
-        return NSRect(x: ox + (vx - l.hr) * s, y: oy + (l.hy - l.hr) * s, width: 2 * l.hr * s, height: 2 * l.hr * s)
+        var vx = slotX(slot(of: g)) + (g.play?.visDX ?? 0), lift: CGFloat = 0
+        if let f = freeSpots[id] { let c = canvasPoint(f); vx = c.x; lift = c.y }   // a pet dragged away: where it stands now
+        return NSRect(x: ox + (vx - l.hr) * s, y: oy + (lift + l.hy - l.hr) * s, width: 2 * l.hr * s, height: 2 * l.hr * s)
     }
 
     /// Anchor for the popover: the host pet's head, or its bed while it is away.
@@ -1773,7 +1906,8 @@ final class PetView: NSView {
         ctx.setLineCap(.round)
 
         for g in guests { g.play = g.director?.frame(at: t) }
-        let play = guests.first?.play   // the host plays with the first guest
+        let mate = guests.first(where: { freeSpots[$0.id] == nil })   // a guest standing beside the host
+        let play = mate?.play   // the host plays with the first one
         lastPlay = play
         let danceH = dance?.frame(at: t)
         let danceV = dance?.frame(at: t, partner: true)
@@ -1796,11 +1930,13 @@ final class PetView: NSView {
             host.draw(ctx, a, t: t, facing: facing, scale: scaleFactor(hostScaling, t))
             ctx.restoreGState()
         }
-        var visXs: [CGFloat] = []
+        var visXs: [CGFloat] = [], visYs: [CGFloat] = []
         for g in guests {
             let p = g.play
-            let visXNow = slotX(slot(of: g)) + (p?.visDX ?? 0) + (danceV?.dx ?? 0)
-            visXs.append(visXNow)
+            let spot = freeSpots[g.id].map { canvasPoint($0) }
+            let visXNow = spot?.x ?? slotX(slot(of: g)) + (p?.visDX ?? 0) + (danceV?.dx ?? 0)
+            let visYNow = spot?.y ?? 0
+            visXs.append(visXNow); visYs.append(visYNow)
             g.x = visXNow
             var a = g.driver.compute(t: t, hovering: false, dragging: false, look: lookVector(forCanvasX: visXNow))
             if let p = p {
@@ -1808,18 +1944,29 @@ final class PetView: NSView {
                 a.tilt += p.visTilt
                 if p.visHappy && a.eyeStyle == .open { a.eyeStyle = .happy }
             }
+            let walking = walkingKeys.contains(g.id)
+            if walking { a.hop += 5 * CGFloat(abs(sin(t * 2 * .pi * 3))) }   // little hops on the way back
             var facing = p?.visFacing ?? 1
+            if walking, let f = walkFacing[g.id] { facing = f }
             if let d = danceV { applyDance(d, to: &a); facing = d.facing }
             ctx.saveGState()
-            ctx.translateBy(x: visXNow - CX, y: 0)
+            ctx.translateBy(x: visXNow - CX, y: visYNow)
             g.artist.draw(ctx, a, t: t, facing: facing, scale: scaleFactor(g.scaling, t))
             ctx.restoreGState()
         }
-        if let p = play, p.hearts, let vx = visXs.first { drawHearts(ctx, x: (hostXNow + vx) / 2, y: 140, t: t) }
-        for (g, vx) in zip(guests, visXs).dropFirst() where g.play?.hearts == true { drawHearts(ctx, x: vx, y: 140, t: t) }
+        if let p = play, p.hearts, let m = mate, let i = guests.firstIndex(where: { $0 === m }) {
+            drawHearts(ctx, x: (hostXNow + visXs[i]) / 2, y: 140, t: t)
+        }
+        for (i, g) in guests.enumerated() where g !== mate && g.play?.hearts == true && freeSpots[g.id] == nil {
+            drawHearts(ctx, x: visXs[i], y: 140, t: t)
+        }
         if dance != nil && hostVisible {
             drawNotes(ctx, x: hostXNow, t: t)
-            for vx in visXs { drawNotes(ctx, x: vx, t: t + 0.7) }
+            for (vx, vy) in zip(visXs, visYs) {   // a free guest's notes rise from where it stands
+                ctx.saveGState(); ctx.translateBy(x: 0, y: vy)
+                drawNotes(ctx, x: vx, t: t + 0.7)
+                ctx.restoreGState()
+            }
         }
         drawPoofs(ctx, t)
         drawNote(ctx, t)
@@ -1903,7 +2050,7 @@ final class PetView: NSView {
             for i in 0..<7 {
                 let ang = CGFloat(i) / 7 * 2 * .pi + 0.3
                 let r = 12 + 30 * e
-                let cx = p.x + cos(ang) * r, cy = 62 + sin(ang) * r * 0.6
+                let cx = p.x + cos(ang) * r, cy = 62 + p.y + sin(ang) * r * 0.6
                 let rad = 8 * (1 - q) + 1
                 ctx.setFillColor(rgb(225, 225, 232, 0.85 * (1 - q)).cgColor)
                 ctx.fillEllipse(in: CGRect(x: cx - rad, y: cy - rad, width: rad * 2, height: rad * 2))
@@ -2387,15 +2534,16 @@ final class VisitorCardController: NSViewController {
 
 // MARK: - Window & app
 
-/// Catches the mouse over the strip of pets (as the old pet window did); the screen-sized window above only draws.
+/// Catches the mouse over one pet; the screen-sized window above only draws.
 final class InputView: NSView {
     weak var target: PetView?
+    var key = "host"                          // the pet this click area covers
     override var acceptsFirstResponder: Bool { return true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { return true }
     override func resetCursorRects() { addCursorRect(bounds, cursor: .openHand) }
-    override func mouseDown(with event: NSEvent) { target?.mouseDown(with: event) }
-    override func mouseDragged(with event: NSEvent) { target?.mouseDragged(with: event) }
-    override func mouseUp(with event: NSEvent) { target?.mouseUp(with: event) }
+    override func mouseDown(with event: NSEvent) { target?.pressDown(event, key: key) }
+    override func mouseDragged(with event: NSEvent) { target?.pressDragged(event) }
+    override func mouseUp(with event: NSEvent) { target?.pressUp(event) }
     override func rightMouseDown(with event: NSEvent) { target?.rightMouseDown(with: event) }
 }
 
@@ -2407,8 +2555,7 @@ final class PetWindow: NSWindow {
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     var window: PetWindow!        // covers the screen, draws the pets, ignores the mouse
-    var inputWindow: PetWindow!   // exactly the strip of pets, takes clicks and drags
-    var inputView: InputView!
+    var inputWindows: [String: PetWindow] = [:]   // one small click area per pet, takes clicks and drags
     var pet: PetView!
     let store = SessionStore()
     var popover: NSPopover?
@@ -2427,7 +2574,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     var awayPeer: PetNet.Peer?
     struct Visitor { let link: Link; let identity: PetIdentity; let since: Date }
     var visitors: [Visitor] = []
-    static let maxVisitors = 3
     var pendingLinks: [Link] = []
     var netTimer: Timer?
     var lastPing = Date.distantPast
@@ -2546,24 +2692,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         pet.onRightClick = { [weak self] e in self?.showMenu(e) }
         pet.onMoved = { [weak self] in self?.savePosition() }
         pet.onDrag = { [weak self] in self?.place($0) }
+        pet.onLayoutChanged = { [weak self] in self?.syncInputs() }
         window.contentView = pet
 
-        inputWindow = PetWindow(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: false)
-        inputWindow.isOpaque = false
-        inputWindow.backgroundColor = NSColor.black.withAlphaComponent(0.005)   // not fully clear, so the strip reliably takes clicks
-        inputWindow.hasShadow = false
-        inputWindow.level = .floating
-        inputWindow.collectionBehavior = window.collectionBehavior
-        inputWindow.isReleasedWhenClosed = false
-        inputWindow.isExcludedFromWindowsMenu = true
-        inputView = InputView(frame: .zero)
-        inputView.target = pet
-        inputWindow.contentView = inputView
         loadPet()
 
         restorePosition()
         window.orderFrontRegardless()
-        inputWindow.orderFrontRegardless()
 
         watch(sessionsDir) { [weak self] in self?.scheduleRefresh() }
         watch(statusDir) { [weak self] in self?.scheduleRefresh() }
@@ -2713,10 +2848,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     // Position & size --------------------------------------------------------
 
-    /// Whether a strip of `slots` pets fits the screen the host is on (the window covers one screen).
-    func stripFits(_ slots: Int) -> Bool {
+    /// How many pets fit in one row across the host's screen.
+    var rowCapacity: Int {
         let screen = window.screen ?? NSScreen.main ?? NSScreen.screens[0]
-        return CGFloat(slots) * PetView.slotWidth * sizeFactor <= screen.frame.width
+        return max(1, Int(screen.frame.width / (PetView.slotWidth * sizeFactor)))
+    }
+    /// The row holds as many pets as fit; any further visitors stand free in rows above it.
+    func syncSlots() {
+        pet.maxSlots = rowCapacity
+        setSlots(min(1 + visitors.count, rowCapacity))
+    }
+
+    /// One click area per pet, each covering just that pet, so a guest can be grabbed and moved away alone.
+    func syncInputs() {
+        var keep = Set<String>()
+        for (key, rect) in pet.petHitRects() {
+            keep.insert(key)
+            let w: PetWindow
+            if let existing = inputWindows[key] {
+                w = existing
+            } else {
+                w = PetWindow(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: false)
+                w.isOpaque = false
+                w.backgroundColor = NSColor.black.withAlphaComponent(0.005)   // not fully clear, so the pet reliably takes clicks
+                w.hasShadow = false
+                w.level = .floating
+                w.collectionBehavior = window.collectionBehavior
+                w.isReleasedWhenClosed = false
+                w.isExcludedFromWindowsMenu = true
+                let v = InputView(frame: .zero)
+                v.target = pet
+                v.key = key
+                w.contentView = v
+                inputWindows[key] = w
+            }
+            if w.frame != rect { w.setFrame(rect, display: false) }
+            if !w.isVisible { w.orderFrontRegardless() }
+        }
+        for key in Array(inputWindows.keys) where !keep.contains(key) {
+            inputWindows[key]?.orderOut(nil)
+            inputWindows[key] = nil
+        }
     }
 
     /// The strip's bottom-left corner in screen coordinates.
@@ -2761,14 +2933,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
         if window.frame != screen.frame { window.setFrame(screen.frame, display: false) }
         pet.stripOrigin = CGPoint(x: o.x - screen.frame.minX, y: o.y - screen.frame.minY)
-        // bigger than the canvas: ears and bubbles rise above it during hops
-        let pad = 24 * pet.scale   // bubbles slide out sideways too
-        inputWindow.setFrame(NSRect(x: o.x - pad, y: o.y, width: pet.stripRect.width + 2 * pad, height: pet.stripRect.height + 40 * pet.scale), display: false)
+        syncInputs()
         pet.refresh()
     }
     @objc func screensChanged() {
-        // a narrower display may no longer hold the strip: send the newest guests home until it does
-        while let v = visitors.last, !stripFits(visitors.count + 1) { dismissVisitor(v.link) }
+        syncSlots()   // a narrower display holds fewer pets in its row; the rest stand free
         place(stripOriginOnScreen)
     }
 
@@ -2862,6 +3031,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let sizeItem = NSMenuItem(title: "Size", action: nil, keyEquivalent: "")
         sizeItem.submenu = sizeMenu
         m.addItem(sizeItem)
+        m.addItem(withTitle: "Gather around", action: #selector(gatherAction), keyEquivalent: "").target = self
         m.addItem(.separator())
 
         let login = m.addItem(withTitle: "Start at login", action: #selector(toggleLogin), keyEquivalent: "")
@@ -2870,7 +3040,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         m.addItem(withTitle: "Open pet folder", action: #selector(openFolder), keyEquivalent: "").target = self
         m.addItem(.separator())
         m.addItem(withTitle: "Quit Claude Pet", action: #selector(quit), keyEquivalent: "").target = self
-        NSMenu.popUpContextMenu(m, with: event, for: inputView)
+        NSMenu.popUpContextMenu(m, with: event, for: event.window?.contentView ?? pet)
     }
 
     @objc func menuStatus() { if popover == nil { togglePopover() } }
@@ -2886,6 +3056,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
     @objc func askNameAction() { askName() }
     @objc func toggleVisitors() { allowVisitors = !allowVisitors }
+    @objc func gatherAction() { pet.gather() }
     @objc func toggleKeyboard() { typingKeyboard = !typingKeyboard; defaults.set(typingKeyboard, forKey: "typingKeyboard") }
     @objc func pickPet(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
@@ -2910,10 +3081,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
     @objc func pickSize(_ sender: NSMenuItem) {
         let hostScreenX = stripOriginOnScreen.x + pet.hostX * pet.scale
-        let oldSize = sizeIndex
         sizeIndex = sender.tag
-        if !stripFits(pet.slots) { sizeIndex = oldSize; pet.showNote("Not enough room for that size with visitors"); return }
         pet.scale = sizeFactor
+        syncSlots()
         place(NSPoint(x: hostScreenX - pet.hostX * sizeFactor, y: stripOriginOnScreen.y))
         savePosition()
     }
@@ -3060,7 +3230,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             case "hello":
                 ident = PetIdentity(dict: msg)
             case "visit":
-                if self.allowVisitors, self.visitors.count < AppDelegate.maxVisitors, self.stripFits(self.visitors.count + 2), let id = ident, !self.visitors.contains(where: { $0.identity.id == id.id }) {
+                if self.allowVisitors, let id = ident, !self.visitors.contains(where: { $0.identity.id == id.id }) {
                     self.acceptVisitor(id, link: link, state: PetState.named(msg["state"] as? String ?? "ready"))
                 } else {
                     link.send(["t": "busy"])
@@ -3087,7 +3257,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private func acceptVisitor(_ id: PetIdentity, link: Link, state: PetState) {
         visitors.append(Visitor(link: link, identity: id, since: Date()))
-        setSlots(1 + visitors.count)
+        pet.maxSlots = rowCapacity
+        setSlots(min(1 + visitors.count, rowCapacity))
         let artist = PetArtist(spec: id.spec ?? PetSpec.builtin("rabbit") ?? PetSpec.fallback)
         artist.name = id.name
         pet.arriveVisitor(id: id.id, artist, state: state)
@@ -3103,7 +3274,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if statusVC == nil, let p = popover, p.isShown { p.performClose(nil) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
             guard let self = self, self.pet.guests.count == self.visitors.count else { return }
-            self.setSlots(1 + self.visitors.count)
+            self.syncSlots()
         }
         writeNetState()
         refreshPopover()
@@ -3153,6 +3324,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 }
             case "recall": callBack()
             case "dismiss": visitors.map { $0.link }.forEach { dismissVisitor($0) }
+            case "gather": pet.gather()
             case "dance": pet.startDance(seconds: Double(body) ?? 8)
             case "snapshot": snapshot(to: body.isEmpty ? petHome + "/snapshot" + (profile.isEmpty ? "" : "-" + profile) + ".png" : body)
             case "name": if !body.isEmpty { setPetName(body) }
