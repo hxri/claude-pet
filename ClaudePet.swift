@@ -1784,7 +1784,7 @@ final class PetView: NSView {
     private var scatterTargets: [String: NSPoint] = [:]   // pet key -> the corner it is waddling to (ground centre, screen points)
     private var lastScatterStep: TimeInterval?
     private var scatterStall: [String: Int] = [:]          // ticks a pet has not got any closer (the host can be held back by the screen edge)
-    /// Right-click -> Scatter: every pet, the host too, waddles off to a corner of the screen it stands on.
+    /// Right-click -> Scatter: every pet, the host too, waddles off to the nearest corner of the screen it stands on.
     /// Gather around brings the guests back to the host.
     func scatter() {
         gathering = false
@@ -1792,16 +1792,17 @@ final class PetView: NSView {
         let inset = 90 * scale, top = vf.maxY - 176 * scale
         let floor = vf.minY + 18 * scale   // room for the name tag under its feet
         let bl = NSPoint(x: vf.minX + inset, y: floor), br = NSPoint(x: vf.maxX - inset, y: floor)
-        var spots = [bl, br, NSPoint(x: bl.x, y: top), NSPoint(x: br.x, y: top)]
-        let keys = ["host"] + guests.map { $0.id }
-        let extra = max(0, keys.count - spots.count)   // more than four pets: the rest spread along the bottom edge
-        for i in 0..<extra { spots.append(NSPoint(x: bl.x + (br.x - bl.x) * CGFloat(i + 1) / CGFloat(extra + 1), y: floor)) }
+        let corners = [bl, br, NSPoint(x: bl.x, y: top), NSPoint(x: br.x, y: top)]
         scatterTargets = [:]
         scatterStall = [:]
-        for key in keys {   // each pet takes the nearest corner still free
+        var taken = [Int: Int]()   // how many pets already head for each corner
+        for key in ["host"] + guests.map({ $0.id }) {   // every pet takes its nearest corner; pets that share one stand side by side
             let here = groundCentre(key)
-            guard let i = spots.indices.min(by: { hypot(spots[$0].x - here.x, spots[$0].y - here.y) < hypot(spots[$1].x - here.x, spots[$1].y - here.y) }) else { break }
-            scatterTargets[key] = spots.remove(at: i)
+            guard let i = corners.indices.min(by: { hypot(corners[$0].x - here.x, corners[$0].y - here.y) < hypot(corners[$1].x - here.x, corners[$1].y - here.y) }) else { break }
+            let n = taken[i, default: 0]
+            taken[i] = n + 1
+            let inward: CGFloat = corners[i].x < vf.midX ? 1 : -1
+            scatterTargets[key] = NSPoint(x: corners[i].x + inward * CGFloat(n) * 110 * scale, y: corners[i].y)
             if key != "host" && freeSpots[key] == nil { freeSpots[key] = here }   // leaves its slot
             autoSpots.remove(key)
         }
@@ -1880,25 +1881,50 @@ final class PetView: NSView {
         }
         dragging = false
     }
+    /// What a drag moves. Dragging a guest moves only that guest; dragging the host carries the guests that are
+    /// standing beside it (so a gathered group moves together) and leaves the ones that were dragged away.
+    /// Shift moves everyone, Option on the host moves the host alone.
+    private enum DragMode { case solo, group, hostAlone, everyone }
+    private var dragMode = DragMode.solo
+    private var groupStarts: [String: NSPoint] = [:]   // where the pets standing away were when an everyone-drag began
+    private var stripStart = NSPoint.zero              // where the strip was (screen points)
+
+    private func clampedAway(_ p: NSPoint) -> NSPoint {
+        guard let vf = (window?.screen ?? NSScreen.main)?.visibleFrame else { return p }   // a guest stays on the screen it was dropped on
+        return NSPoint(x: min(max(p.x, vf.minX + 90 * scale), vf.maxX - 90 * scale), y: min(max(p.y, vf.minY), vf.maxY - 176 * scale))
+    }
     func pressDragged(_ event: NSEvent) {
         let p = NSEvent.mouseLocation
-        let dx = p.x - dragOrigin.x, dy = p.y - dragOrigin.y
+        dragStep(dx: p.x - dragOrigin.x, dy: p.y - dragOrigin.y, mods: event.modifierFlags)
+    }
+    func dragStep(dx: CGFloat, dy: CGFloat, mods: NSEvent.ModifierFlags) {
         if !dragging && hypot(dx, dy) > 3 {
             dragging = true; NSCursor.closedHand.push()
-            if pressKey == "host" {   // carrying the host off leaves the guests where they stand
-                for g in guests where freeSpots[g.id] == nil { freeSpots[g.id] = groundCentre(g.id) }
+            if mods.contains(.shift) { dragMode = .everyone }
+            else if pressKey != "host" { dragMode = .solo }
+            else { dragMode = mods.contains(.option) ? .hostAlone : .group }
+            if dragMode == .hostAlone {   // leave the guests that stand beside the host where they stand
+                for g in guests where freeSpots[g.id] == nil { freeSpots[g.id] = groundCentre(g.id); autoSpots.remove(g.id) }
             }
+            groupStarts = freeSpots
+            let wo = window?.frame.origin ?? .zero
+            stripStart = NSPoint(x: wo.x + stripOrigin.x, y: wo.y + stripOrigin.y)
         }
         guard dragging else { return }
-        var to = NSPoint(x: dragStartOrigin.x + dx, y: dragStartOrigin.y + dy)
-        if pressKey == "host" { onDrag?(to); return }
-        if let vf = (window?.screen ?? NSScreen.main)?.visibleFrame {   // a guest stays on the screen it was dropped on
-            to.x = min(max(to.x, vf.minX + 90 * scale), vf.maxX - 90 * scale)
-            to.y = min(max(to.y, vf.minY), vf.maxY - 176 * scale)
+        switch dragMode {
+        case .group, .hostAlone:
+            onDrag?(NSPoint(x: dragStartOrigin.x + dx, y: dragStartOrigin.y + dy))
+        case .everyone:
+            onDrag?(NSPoint(x: stripStart.x + dx, y: stripStart.y + dy))
+            for (key, start) in groupStarts where guests.contains(where: { $0.id == key }) {
+                freeSpots[key] = clampedAway(NSPoint(x: start.x + dx, y: start.y + dy))
+            }
+            onLayoutChanged?()
+        case .solo:
+            freeSpots[pressKey] = clampedAway(NSPoint(x: dragStartOrigin.x + dx, y: dragStartOrigin.y + dy))
+            autoSpots.remove(pressKey)
+            onLayoutChanged?()
         }
-        freeSpots[pressKey] = to
-        autoSpots.remove(pressKey)
-        onLayoutChanged?()
         needsDisplay = true
     }
     func pressUp(_ event: NSEvent) {

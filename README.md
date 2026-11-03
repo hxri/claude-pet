@@ -38,8 +38,10 @@ Both laptops need the pet running and either the same Wi-Fi network or Wi-Fi swi
    the two pets play: greeting hops, nuzzles with hearts, chasing, zoomies.
    Up to 12 pets can visit one host at once: the row grows to fit the screen, and extra visitors
    stand in rows above it. Drag any pet away on its own, right-click → **Gather around** to bring
-   them back, **Scatter** to send every pet waddling off to the corners of the screen, and
-   *Send \<pet\> home* sends one back.
+   them back, **Scatter** to send every pet waddling off to its nearest corner of the screen, and
+   *Send \<pet\> home* sends one back. Dragging a visitor moves just that visitor. Dragging your pet
+   carries the visitors standing beside it, so a gathered group moves together; hold **Shift** to move
+   every pet at once, or **Option** to move your pet alone.
 3. Your pet keeps showing *your* Claude status while it's away, so your friend can see when you're
    busy. Right-click (or click the bed) → **Call back** brings it home. The host can also send a
    visitor home. If the laptops lose each other, the pet comes home by itself after ~25 seconds.
