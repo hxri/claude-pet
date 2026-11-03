@@ -1557,6 +1557,8 @@ final class PetView: NSView {
     private var note: (text: String, until: TimeInterval)?
     enum Reaction { case cheer, droop }
     private var reaction: (kind: Reaction, start: TimeInterval)?
+    /// 0…1, how worn out the pet looks: set from the usage left (rate limits, context fill).
+    var tiredness: CGFloat = 0
     func react(_ kind: Reaction, at start: TimeInterval? = nil) { reaction = (kind, start ?? now) }
 
     private let epoch = Date()
@@ -1796,6 +1798,7 @@ final class PetView: NSView {
             var facing = play?.hostFacing ?? 1
             if let d = danceH { applyDance(d, to: &a); facing = d.facing }
             applyReaction(&a, t)
+            applyTired(&a, t)
             host.showName = !guests.isEmpty
             ctx.saveGState()
             ctx.translateBy(x: hostXNow - CX, y: 0)
@@ -1821,6 +1824,7 @@ final class PetView: NSView {
             g.artist.draw(ctx, a, t: t, facing: facing, scale: scaleFactor(g.scaling, t))
             ctx.restoreGState()
         }
+        if tiredness > 0.8 && hostVisible && hostDriver.state != .sleeping { drawSweat(ctx, x: hostXNow, t: t) }
         if let r = reaction, hostVisible {
             if r.kind == .cheer { drawHearts(ctx, x: hostXNow, y: 128, t: t) } else { drawRain(ctx, x: hostXNow, t: t) }
         }
@@ -1857,6 +1861,38 @@ final class PetView: NSView {
             a.lookY -= 2 * fade
             a.tilt += CGFloat(sin(p * 2 * .pi * 7)) * 0.025 * fade   // a small shiver
         }
+    }
+
+    /// Worn out by high usage: ears sag, slower tail, heavy eyes, now and then a yawn.
+    private func applyTired(_ a: inout Anim, _ t: TimeInterval) {
+        let k = tiredness
+        guard k > 0, hostDriver.state != .sleeping else { return }
+        a.earL = max(-1, a.earL - 0.9 * k); a.earR = max(-1, a.earR - 0.9 * k)
+        a.tail *= 1 - 0.7 * k
+        a.eyeScale *= 1 - 0.3 * k
+        a.lookY -= 1.5 * k
+        if k > 0.35 {
+            let ph = t.truncatingRemainder(dividingBy: 14)
+            if ph < 1.8 {
+                let y = CGFloat(sin(ph / 1.8 * .pi))
+                a.mouth = .open
+                a.eyeOpen *= 1 - 0.9 * y
+                a.sy += 0.04 * y
+                a.hop += 2 * y
+            }
+        }
+    }
+
+    /// A sweat drop sliding down the side of the head.
+    private func drawSweat(_ ctx: CGContext, x: CGFloat, t: TimeInterval) {
+        let ph = CGFloat((t * 0.45).truncatingRemainder(dividingBy: 1))
+        let l = host.layout
+        ctx.saveGState()
+        ctx.setAlpha(min(1, ph * 6) * min(1, (1 - ph) * 4))
+        ctx.setFillColor(rgb(110, 175, 240).cgColor)
+        let cx = x - CX + l.hx + l.hr * 0.72, cy = l.hy + l.hr * 0.55 - 26 * ph
+        ctx.fillEllipse(in: CGRect(x: cx - 2.6, y: cy - 3.6, width: 5.2, height: 7.2))
+        ctx.restoreGState()
     }
 
     /// A little rain cloud over a drooping pet.
@@ -2707,6 +2743,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         noticeChanges()
         let st = store.petState
         pet.setHostState(st)
+        pet.tiredness = reactions ? tiredness() : 0
         pet.host.tagColor = store.topState.color
         pet.host.sessionCount = store.sessions.count
         if awayPhase == .away, st != lastSentState {
@@ -2714,6 +2751,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             lastSentState = st
         }
         refreshPopover()
+    }
+    /// How worn out the pet looks: 0 up to 70% of the most-used rate limit or context window, 1 at 95%.
+    private func tiredness() -> CGFloat {
+        let now = Date()
+        var used = store.sessions.compactMap { $0.contextPct }.max() ?? 0
+        if let rl = store.rateLimits {
+            for l in [rl.fiveHour, rl.sevenDay].compactMap({ $0 }) where (l.resetsAt ?? .distantFuture) > now { used = max(used, l.usedPct) }
+        }
+        return CGFloat(min(1, max(0, (used - 70) / 25)))
     }
     private func refreshPopover() {
         if let p = popover, p.isShown { statusVC?.render(store, visit: visitInfo()) }
@@ -3291,12 +3337,18 @@ func renderPNG(state: String, path: String, coat: Int?, points: CGFloat, petArg:
         forced = (nums.first ?? 1, nums.count > 1 ? nums[1] : 10)
     }
     // cheer@<s into the reaction> and droop@<s>
-    var reactSince: Double?
+    var reactSince: Double?, tiredK: Double?
+    if state.hasPrefix("tired") {
+        let nums = state.dropFirst(6).split(separator: "/").compactMap { Double($0) }
+        tiredK = nums.first ?? 1
+        reactSince = nums.count > 1 ? nums[1] : 0
+    }
     if state.hasPrefix("cheer") || state.hasPrefix("droop") { reactSince = Double(state.split(separator: "@").last ?? "1") ?? 1 }
-    let shown = forced != nil ? "working" : (state.hasPrefix("cheer") ? "waiting" : (state.hasPrefix("droop") ? "attention" : state))
+    let shown = forced != nil ? "working" : (state.hasPrefix("cheer") ? "waiting" : (state.hasPrefix("droop") ? "attention" : (state.hasPrefix("tired") ? "ready" : state)))
     view.setHostState(PetState.named(shown))
     view.hostDriver.forceTyping = forced
     view.host.tagColor = view.host.state.color
+    if let k = tiredK { view.tiredness = CGFloat(k) }
     if state.hasPrefix("cheer") { view.react(.cheer, at: 1.0) }
     if state.hasPrefix("droop") { view.react(.droop, at: 1.0) }
     view.frozenTime = 1.0 + (forced?.since ?? reactSince ?? 0)   // typing@<s>: the clock moves with it, so paws and keys animate across frames
