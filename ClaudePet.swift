@@ -3499,18 +3499,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             it.target = self
             it.representedObject = v.identity.id
         }
-        let rc = m.addItem(withTitle: "Reactions", action: #selector(toggleReactions), keyEquivalent: "")
+        // What the pet does on its own: one submenu of toggles, separate from how it looks.
+        let behavior = NSMenu()
+        behavior.autoenablesItems = false
+        let rc = behavior.addItem(withTitle: "Reactions", action: #selector(toggleReactions), keyEquivalent: "")
         rc.target = self
         rc.state = reactions ? .on : .off
-        let tm = m.addItem(withTitle: "Tired at high usage", action: #selector(toggleTired), keyEquivalent: "")
+        let tm = behavior.addItem(withTitle: "Tired at high usage", action: #selector(toggleTired), keyEquivalent: "")
         tm.target = self
         tm.state = tiredMood ? .on : .off
-        let sd = m.addItem(withTitle: "Sounds", action: #selector(toggleSounds), keyEquivalent: "")
+        let sd = behavior.addItem(withTitle: "Sounds", action: #selector(toggleSounds), keyEquivalent: "")
         sd.target = self
         sd.state = sounds ? .on : .off
-        let kb = m.addItem(withTitle: "Typing keyboard", action: #selector(toggleKeyboard), keyEquivalent: "")
+        let kb = behavior.addItem(withTitle: "Typing keyboard", action: #selector(toggleKeyboard), keyEquivalent: "")
         kb.target = self
         kb.state = typingKeyboard ? .on : .off
+        let behaviorItem = NSMenuItem(title: "Behavior", action: nil, keyEquivalent: "")
+        behaviorItem.submenu = behavior
+        m.addItem(behaviorItem)
         let av = m.addItem(withTitle: "Allow visitors", action: #selector(toggleVisitors), keyEquivalent: "")
         av.target = self
         av.state = allowVisitors ? .on : .off
