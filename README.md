@@ -10,7 +10,7 @@ sessions are doing, and that can visit a friend's pet when your laptops are near
   cost, and your 5-hour / weekly usage. Each session has a **Go to** button that brings forward the terminal
   or app it runs in (Terminal and iTerm2 also pick the right tab), and **double-clicking** the pet goes to the
   session that needs you most.
-- Right-click to name it, pick a pet, coat and size, and to send it to a nearby friend's pet.
+- Right-click for **Gather around** and **Scatter**, **Pet settings** (name, pet, coat and size), and to send it to a nearby friend's pet.
 - Hold **Control + Option** together and it dances (a visiting pet joins in). "Dance!" is in the menu too.
 
 ## Install
