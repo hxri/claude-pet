@@ -1337,8 +1337,7 @@ final class PlayDirector {
                 f.visFacing = -dir
             }
         case .chase:
-            // The host stands in the window's outer slot, so overshoot only a little or the guest is cut off at the edge.
-            let far = PlayDirector.slot + 24
+            let far = PlayDirector.slot + PlayDirector.near
             func crossHop(_ q: CGFloat) -> CGFloat {
                 let distToHost = abs(dir * PlayDirector.slot + f.visDX)
                 return distToHost < 70 ? 30 * (1 - distToHost / 70) + 6 : hops(q, count: 4, height: 6)
@@ -1541,7 +1540,7 @@ final class PetView: NSView {
 
     /// Repaints the strip (and where it was), not the whole screen. A speech note can run far past the strip.
     func refresh() {
-        var dirty = stripRect.insetBy(dx: -(note == nil ? 60 : 300) * scale, dy: -30 * scale)
+        var dirty = stripRect.insetBy(dx: -(note == nil ? 110 : 300) * scale, dy: -30 * scale)
         dirty.size.height += 80 * scale   // hops stack: a waiting guest mid-chase puts its bubble at y=234 of a 190 canvas
         setNeedsDisplay(dirty.union(lastDirty))
         lastDirty = dirty
@@ -3127,7 +3126,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private func snapshot(to path: String) {
-        let r = pet.stripRect
+        let r = pet.stripRect.insetBy(dx: -110 * pet.scale, dy: 0)   // a chasing guest runs past the strip
         pet.needsDisplay = true
         pet.displayIfNeeded()
         guard let rep = pet.bitmapImageRepForCachingDisplay(in: r) else { return }
