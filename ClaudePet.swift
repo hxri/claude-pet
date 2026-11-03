@@ -3433,7 +3433,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let dance = m.addItem(withTitle: "Dance!", action: #selector(danceAction), keyEquivalent: "")
         dance.target = self
         dance.toolTip = "Or hold Control and Option together"
+        m.addItem(withTitle: "Gather around", action: #selector(gatherAction), keyEquivalent: "").target = self
+        m.addItem(withTitle: "Scatter", action: #selector(scatterAction), keyEquivalent: "").target = self
         m.addItem(.separator())
+
+        // Everything about how the pet looks lives in one submenu.
+        let settings = NSMenu()
+        settings.autoenablesItems = false
+        settings.addItem(withTitle: "Name my pet…", action: #selector(askNameAction), keyEquivalent: "").target = self
+        let petMenu = NSMenu()
+        for p in AppDelegate.availablePets() {
+            let it = petMenu.addItem(withTitle: p.name, action: #selector(pickPet(_:)), keyEquivalent: "")
+            it.target = self
+            it.representedObject = p.id
+            it.state = (p.id == petFile) ? .on : .off
+        }
+        petMenu.addItem(.separator())
+        petMenu.addItem(withTitle: "New pet with Claude…", action: #selector(newPetHelp), keyEquivalent: "").target = self
+        let petItem = NSMenuItem(title: "Pet", action: nil, keyEquivalent: "")
+        petItem.submenu = petMenu
+        settings.addItem(petItem)
+
+        let coatMenu = NSMenu()
+        let def = coatMenu.addItem(withTitle: "Default", action: #selector(pickCoat(_:)), keyEquivalent: "")
+        def.target = self; def.tag = -1; def.state = coatIndex == nil ? .on : .off
+        for (i, c) in Coat.all.enumerated() {
+            let it = coatMenu.addItem(withTitle: c.name, action: #selector(pickCoat(_:)), keyEquivalent: "")
+            it.target = self; it.tag = i; it.state = (i == coatIndex) ? .on : .off
+        }
+        let coatItem = NSMenuItem(title: "Coat", action: nil, keyEquivalent: "")
+        coatItem.submenu = coatMenu
+        settings.addItem(coatItem)
+
+        let sizeMenu = NSMenu()
+        for (i, s) in AppDelegate.sizes.enumerated().sorted(by: { $0.element.1 < $1.element.1 }) {
+            let it = sizeMenu.addItem(withTitle: s.0, action: #selector(pickSize(_:)), keyEquivalent: "")
+            it.target = self; it.tag = i; it.state = (i == sizeIndex) ? .on : .off
+        }
+        let sizeItem = NSMenuItem(title: "Size", action: nil, keyEquivalent: "")
+        sizeItem.submenu = sizeMenu
+        settings.addItem(sizeItem)
+        let settingsItem = NSMenuItem(title: "Pet settings", action: nil, keyEquivalent: "")
+        settingsItem.submenu = settings
+        m.addItem(settingsItem)
 
         let nearby = NSMenu()
         nearby.autoenablesItems = false
@@ -3457,58 +3499,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             it.target = self
             it.representedObject = v.identity.id
         }
-        let rc = m.addItem(withTitle: "Reactions", action: #selector(toggleReactions), keyEquivalent: "")
+        // What the pet does on its own: one submenu of toggles, separate from how it looks.
+        let behavior = NSMenu()
+        behavior.autoenablesItems = false
+        let rc = behavior.addItem(withTitle: "Reactions", action: #selector(toggleReactions), keyEquivalent: "")
         rc.target = self
         rc.state = reactions ? .on : .off
-        let tm = m.addItem(withTitle: "Tired at high usage", action: #selector(toggleTired), keyEquivalent: "")
+        let tm = behavior.addItem(withTitle: "Tired at high usage", action: #selector(toggleTired), keyEquivalent: "")
         tm.target = self
         tm.state = tiredMood ? .on : .off
-        let sd = m.addItem(withTitle: "Sounds", action: #selector(toggleSounds), keyEquivalent: "")
+        let sd = behavior.addItem(withTitle: "Sounds", action: #selector(toggleSounds), keyEquivalent: "")
         sd.target = self
         sd.state = sounds ? .on : .off
-        let kb = m.addItem(withTitle: "Typing keyboard", action: #selector(toggleKeyboard), keyEquivalent: "")
+        let kb = behavior.addItem(withTitle: "Typing keyboard", action: #selector(toggleKeyboard), keyEquivalent: "")
         kb.target = self
         kb.state = typingKeyboard ? .on : .off
+        let behaviorItem = NSMenuItem(title: "Behavior", action: nil, keyEquivalent: "")
+        behaviorItem.submenu = behavior
+        m.addItem(behaviorItem)
         let av = m.addItem(withTitle: "Allow visitors", action: #selector(toggleVisitors), keyEquivalent: "")
         av.target = self
         av.state = allowVisitors ? .on : .off
-        m.addItem(.separator())
-
-        m.addItem(withTitle: "Name my pet…", action: #selector(askNameAction), keyEquivalent: "").target = self
-        let petMenu = NSMenu()
-        for p in AppDelegate.availablePets() {
-            let it = petMenu.addItem(withTitle: p.name, action: #selector(pickPet(_:)), keyEquivalent: "")
-            it.target = self
-            it.representedObject = p.id
-            it.state = (p.id == petFile) ? .on : .off
-        }
-        petMenu.addItem(.separator())
-        petMenu.addItem(withTitle: "New pet with Claude…", action: #selector(newPetHelp), keyEquivalent: "").target = self
-        let petItem = NSMenuItem(title: "Pet", action: nil, keyEquivalent: "")
-        petItem.submenu = petMenu
-        m.addItem(petItem)
-
-        let coatMenu = NSMenu()
-        let def = coatMenu.addItem(withTitle: "Default", action: #selector(pickCoat(_:)), keyEquivalent: "")
-        def.target = self; def.tag = -1; def.state = coatIndex == nil ? .on : .off
-        for (i, c) in Coat.all.enumerated() {
-            let it = coatMenu.addItem(withTitle: c.name, action: #selector(pickCoat(_:)), keyEquivalent: "")
-            it.target = self; it.tag = i; it.state = (i == coatIndex) ? .on : .off
-        }
-        let coatItem = NSMenuItem(title: "Coat", action: nil, keyEquivalent: "")
-        coatItem.submenu = coatMenu
-        m.addItem(coatItem)
-
-        let sizeMenu = NSMenu()
-        for (i, s) in AppDelegate.sizes.enumerated().sorted(by: { $0.element.1 < $1.element.1 }) {
-            let it = sizeMenu.addItem(withTitle: s.0, action: #selector(pickSize(_:)), keyEquivalent: "")
-            it.target = self; it.tag = i; it.state = (i == sizeIndex) ? .on : .off
-        }
-        let sizeItem = NSMenuItem(title: "Size", action: nil, keyEquivalent: "")
-        sizeItem.submenu = sizeMenu
-        m.addItem(sizeItem)
-        m.addItem(withTitle: "Gather around", action: #selector(gatherAction), keyEquivalent: "").target = self
-        m.addItem(withTitle: "Scatter", action: #selector(scatterAction), keyEquivalent: "").target = self
         m.addItem(.separator())
 
         let login = m.addItem(withTitle: "Start at login", action: #selector(toggleLogin), keyEquivalent: "")
