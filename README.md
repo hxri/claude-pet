@@ -68,7 +68,7 @@ with it, so your friends see your custom pet when it visits, whatever pets they 
 ## Scripting it
 
 The app watches `~/.claude/pet/control/`. Creating a file there triggers an action and the file is
-removed: `send` (optional content: part of the friend's pet name), `recall`, `dismiss`, `gather`, `scatter`, `dance` (content: seconds), `name`
+removed: `send` (optional content: part of the friend's pet name), `recall`, `dismiss`, `gather`, `scatter`, `goto` (go to the session that needs you most), `dance` (content: seconds), `name`
 (content: the new name), `pet` (content: a pet id from `pets/`), `snapshot` (writes `snapshot.png`; `snapshot-all` writes the whole screen). `net-state.json` lists nearby pets
 and the current visit.
 
