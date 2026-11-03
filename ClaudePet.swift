@@ -1600,7 +1600,8 @@ final class PetView: NSView {
         pollDanceKeys()
         pollHover()
         stepReturn()
-        let idle = hostDriver.state == .sleeping && guests.isEmpty && poofs.isEmpty && hostScaling == nil && !hovering && !dragging && dance == nil
+        stepScatter()
+        let idle = hostDriver.state == .sleeping && guests.isEmpty && poofs.isEmpty && hostScaling == nil && !hovering && !dragging && dance == nil && scatterTargets.isEmpty
         if idle && frameCount % 3 != 0 { return }
         refresh()
     }
@@ -1751,7 +1752,7 @@ final class PetView: NSView {
     private var walkFacing: [String: CGFloat] = [:]   // which way each gathering pet is heading
     private var walkingKeys = Set<String>()           // pets still on their way home
     /// Right-click → Gather around: the pets that were dragged away walk back to the group.
-    func gather() { gathering = true }
+    func gather() { gathering = true; scatterTargets = [:] }
     private func stepReturn() {
         let t = now
         let dt = CGFloat(min(0.1, max(0, t - (lastReturnStep ?? t))))
@@ -1778,6 +1779,59 @@ final class PetView: NSView {
         if walkingKeys.isEmpty { gathering = false }
         if moved { onLayoutChanged?() }
     }
+    // Scatter ------------------------------------------------------------------
+
+    private var scatterTargets: [String: NSPoint] = [:]   // pet key -> the corner it is waddling to (ground centre, screen points)
+    private var lastScatterStep: TimeInterval?
+    private var scatterStall: [String: Int] = [:]          // ticks a pet has not got any closer (the host can be held back by the screen edge)
+    /// Right-click -> Scatter: every pet, the host too, waddles off to a corner of the screen it stands on.
+    /// Gather around brings the guests back to the host.
+    func scatter() {
+        gathering = false
+        guard let vf = (window?.screen ?? NSScreen.main)?.visibleFrame else { return }
+        let inset = 90 * scale, top = vf.maxY - 176 * scale
+        let floor = vf.minY + 18 * scale   // room for the name tag under its feet
+        let bl = NSPoint(x: vf.minX + inset, y: floor), br = NSPoint(x: vf.maxX - inset, y: floor)
+        var spots = [bl, br, NSPoint(x: bl.x, y: top), NSPoint(x: br.x, y: top)]
+        let keys = ["host"] + guests.map { $0.id }
+        let extra = max(0, keys.count - spots.count)   // more than four pets: the rest spread along the bottom edge
+        for i in 0..<extra { spots.append(NSPoint(x: bl.x + (br.x - bl.x) * CGFloat(i + 1) / CGFloat(extra + 1), y: floor)) }
+        scatterTargets = [:]
+        scatterStall = [:]
+        for key in keys {   // each pet takes the nearest corner still free
+            let here = groundCentre(key)
+            guard let i = spots.indices.min(by: { hypot(spots[$0].x - here.x, spots[$0].y - here.y) < hypot(spots[$1].x - here.x, spots[$1].y - here.y) }) else { break }
+            scatterTargets[key] = spots.remove(at: i)
+            if key != "host" && freeSpots[key] == nil { freeSpots[key] = here }   // leaves its slot
+            autoSpots.remove(key)
+        }
+    }
+    private func stepScatter() {
+        let t = now
+        let dt = CGFloat(min(0.1, max(0, t - (lastScatterStep ?? t))))
+        lastScatterStep = t
+        guard !scatterTargets.isEmpty else { return }
+        for (key, goal) in scatterTargets where !(dragging && pressKey == key) {
+            let here = groundCentre(key)
+            let dx = goal.x - here.x, dy = goal.y - here.y, d = hypot(dx, dy)
+            if d < 2 || scatterStall[key, default: 0] > 15 {   // arrived, or cannot get any closer
+                scatterTargets[key] = nil
+                if key == "host" { onMoved?() }
+                continue
+            }
+            let step = min(d, 150 * dt)   // a waddle, slower than the walk back
+            let to = NSPoint(x: here.x + dx / d * step, y: here.y + dy / d * step)
+            if abs(dx) > 1 { walkFacing[key] = dx > 0 ? -1 : 1 }   // facing +1 looks left
+            if key == "host" {
+                onDrag?(NSPoint(x: to.x - hostX * scale, y: to.y))   // moves the strip, so the host leaves its guests behind
+                if hypot(groundCentre(key).x - here.x, groundCentre(key).y - here.y) < 0.01 { scatterStall[key, default: 0] += 1 } else { scatterStall[key] = 0 }
+            } else {
+                freeSpots[key] = to
+            }
+        }
+        onLayoutChanged?()
+    }
+
     /// Where a guest stands in its slot, ignoring any walk.
     private func slotCentre(_ g: Guest) -> NSPoint {
         let ox = (window?.frame.minX ?? 0) + stripOrigin.x, oy = (window?.frame.minY ?? 0) + stripOrigin.y
@@ -1816,6 +1870,7 @@ final class PetView: NSView {
     /// dragging a guest moves only that guest.
     func pressDown(_ event: NSEvent, key: String) {
         pressKey = key
+        scatterTargets[key] = nil
         dragOrigin = NSEvent.mouseLocation
         if key == "host" {
             let wo = window?.frame.origin ?? .zero
@@ -1938,6 +1993,11 @@ final class PetView: NSView {
             if let d = danceH { applyDance(d, to: &a); facing = d.facing }
             applyReaction(&a, t)
             applyTired(&a, t)
+            if scatterTargets["host"] != nil {   // waddling off to a corner
+                a.hop += 4 * CGFloat(abs(sin(t * 2 * .pi * 3.5)))
+                a.tilt += 0.1 * CGFloat(sin(t * 2 * .pi * 3.5))
+                if let f = walkFacing["host"] { facing = f }
+            }
             host.showName = !guests.isEmpty
             ctx.saveGState()
             ctx.translateBy(x: hostXNow - CX, y: 0)
@@ -1959,9 +2019,12 @@ final class PetView: NSView {
                 if p.visHappy && a.eyeStyle == .open { a.eyeStyle = .happy }
             }
             let walking = walkingKeys.contains(g.id)
-            if walking { a.hop += 5 * CGFloat(abs(sin(t * 2 * .pi * 3))) }   // little hops on the way back
+            if walking || scatterTargets[g.id] != nil {   // little hops and a waddle on the way
+                a.hop += 5 * CGFloat(abs(sin(t * 2 * .pi * 3)))
+                a.tilt += 0.1 * CGFloat(sin(t * 2 * .pi * 3.5))
+            }
             var facing = p?.visFacing ?? 1
-            if walking, let f = walkFacing[g.id] { facing = f }
+            if walking || scatterTargets[g.id] != nil, let f = walkFacing[g.id] { facing = f }
             if let d = danceV { applyDance(d, to: &a); facing = d.facing }
             ctx.saveGState()
             ctx.translateBy(x: visXNow - CX, y: visYNow)
@@ -3181,6 +3244,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         sizeItem.submenu = sizeMenu
         m.addItem(sizeItem)
         m.addItem(withTitle: "Gather around", action: #selector(gatherAction), keyEquivalent: "").target = self
+        m.addItem(withTitle: "Scatter", action: #selector(scatterAction), keyEquivalent: "").target = self
         m.addItem(.separator())
 
         let login = m.addItem(withTitle: "Start at login", action: #selector(toggleLogin), keyEquivalent: "")
@@ -3206,6 +3270,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     @objc func askNameAction() { askName() }
     @objc func toggleVisitors() { allowVisitors = !allowVisitors }
     @objc func gatherAction() { pet.gather() }
+    @objc func scatterAction() { pet.scatter() }
     @objc func toggleReactions() { reactions = !reactions; defaults.set(reactions, forKey: "reactions") }
     @objc func toggleTired() { tiredMood = !tiredMood; defaults.set(tiredMood, forKey: "tiredMood") }
     @objc func toggleSounds() { sounds = !sounds; defaults.set(sounds, forKey: "sounds") }
@@ -3477,6 +3542,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             case "recall": callBack()
             case "dismiss": visitors.map { $0.link }.forEach { dismissVisitor($0) }
             case "gather": pet.gather()
+            case "scatter": pet.scatter()
+            case "snapshot-all": snapshot(to: body.isEmpty ? petHome + "/snapshot-all.png" : body, whole: true)
             case "dance": pet.startDance(seconds: Double(body) ?? 8)
             case "snapshot": snapshot(to: body.isEmpty ? petHome + "/snapshot" + (profile.isEmpty ? "" : "-" + profile) + ".png" : body)
             case "name": if !body.isEmpty { setPetName(body) }
@@ -3493,8 +3560,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
     }
 
-    private func snapshot(to path: String) {
-        let r = pet.stripRect.insetBy(dx: -110 * pet.scale, dy: 0)   // a chasing guest runs past the strip
+    private func snapshot(to path: String, whole: Bool = false) {
+        let r = whole ? pet.bounds : pet.stripRect.insetBy(dx: -110 * pet.scale, dy: 0)   // whole: the full screen, for pets that wandered off; else the strip, with room for a chasing guest
         pet.needsDisplay = true
         pet.displayIfNeeded()
         guard let rep = pet.bitmapImageRepForCachingDisplay(in: r) else { return }
